@@ -9,13 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cedar2025/xboard-node/internal/config"
-	"github.com/cedar2025/xboard-node/internal/controlplane"
-	"github.com/cedar2025/xboard-node/internal/model"
-	"github.com/cedar2025/xboard-node/internal/monitor"
-	"github.com/cedar2025/xboard-node/internal/nlog"
-	"github.com/cedar2025/xboard-node/internal/panel"
-	"github.com/cedar2025/xboard-node/internal/service"
+	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/controlplane"
+	"github.com/fearless743/fboard-node/internal/monitor"
+	"github.com/fearless743/fboard-node/internal/nlog"
+	"github.com/fearless743/fboard-node/internal/panel"
+	"github.com/fearless743/fboard-node/internal/service"
 )
 
 // nodeHandle tracks a running node service.
@@ -134,17 +133,6 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	nodeCfg := o.cfg.ExpandMachineNode(mn.ID, mn.Type)
 
 	perNodeClient := o.client.ForNode(mn.ID)
-
-	// Pre-fetch node config to detect transport-based kernel requirements.
-	// Resolve kernel type from protocol first, then check transport compatibility.
-	if cfgSnapshot, err := perNodeClient.GetConfig(); err == nil && cfgSnapshot != nil {
-		nodeCfg.Kernel.Type = model.ResolveKernelType(cfgSnapshot.Protocol)
-		if resolved := model.ResolveKernelForTransport(cfgSnapshot.Network, nodeCfg.Kernel.Type); resolved != nodeCfg.Kernel.Type {
-			nlog.Core().Info(fmt.Sprintf("machine: auto-switching kernel for node %d (%s→%s, transport=%s)",
-				mn.ID, nodeCfg.Kernel.Type, resolved, cfgSnapshot.Network))
-			nodeCfg.Kernel.Type = resolved
-		}
-	}
 	// Reset cached ETag so the subsequent GetConfig in Initial() gets a full response.
 	perNodeClient.ResetConfigETag()
 

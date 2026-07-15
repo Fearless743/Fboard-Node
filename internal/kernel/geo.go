@@ -3,7 +3,7 @@ package kernel
 import (
 	"strings"
 
-	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/model"
 )
 
 // NeedsGeoIP returns true when any panel route rule contains a "geoip:" match entry.

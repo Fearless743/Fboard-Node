@@ -8,25 +8,25 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/cedar2025/xboard-node/internal/cert"
-	"github.com/cedar2025/xboard-node/internal/cert/dnsproviders"
-	"github.com/cedar2025/xboard-node/internal/config"
-	"github.com/cedar2025/xboard-node/internal/controlplane"
-	"github.com/cedar2025/xboard-node/internal/kernel"
-	"github.com/cedar2025/xboard-node/internal/kernel/singbox"
-	"github.com/cedar2025/xboard-node/internal/kernel/xray"
-	"github.com/cedar2025/xboard-node/internal/kernel/mihomo"
-	"github.com/cedar2025/xboard-node/internal/limiter"
-	"github.com/cedar2025/xboard-node/internal/model"
-	"github.com/cedar2025/xboard-node/internal/monitor"
-	"github.com/cedar2025/xboard-node/internal/nlog"
-	"github.com/cedar2025/xboard-node/internal/tracker"
+	"github.com/fearless743/fboard-node/internal/cert"
+	"github.com/fearless743/fboard-node/internal/cert/dnsproviders"
+	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/controlplane"
+	"github.com/fearless743/fboard-node/internal/kernel"
+	"github.com/fearless743/fboard-node/internal/kernel/xray"
+	"github.com/fearless743/fboard-node/internal/limiter"
+	"github.com/fearless743/fboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/monitor"
+	"github.com/fearless743/fboard-node/internal/nlog"
+	"github.com/fearless743/fboard-node/internal/tracker"
 )
 
 type Service struct {
@@ -140,18 +140,8 @@ func NewWithControlPlane(cfg *config.Config, cp controlplane.ControlPlane) *Serv
 func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	certMgr := cert.NewManager(cfg.Cert)
 
-	// Create kernel based on configured type. Machine mode sets this per-node;
-	// ensureKernelForProtocol may still switch it later if the protocol
-	// requires a different kernel.
-	var k kernel.Kernel
-	switch cfg.Kernel.Type {
-	case "singbox":
-		k = singbox.New(cfg.Kernel)
-	case "mihomo":
-		k = mihomo.New(cfg.Kernel)
-	default:
-		k = xray.New(cfg.Kernel)
-	}
+	// xray is the only kernel.
+	k := xray.New(cfg.Kernel)
 
 	l := limiter.New()
 	st := limiter.NewSpeedTracker(l)
@@ -171,33 +161,9 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	}
 }
 
-// ensureKernelForProtocol checks whether the current kernel supports the
-// given protocol. If not, it auto-switches to the other kernel (xray is
-// preferred; singbox is used for xray-unsupported protocols like tuic,
-// naive, anytls, mieru, hysteria2).
+// ensureKernelForProtocol is a no-op because xray supports all protocols.
 func (s *Service) ensureKernelForProtocol(protocol string) {
-	resolved := model.ResolveKernelForProtocol(protocol, s.cfg.Kernel.Type)
-	if resolved == s.cfg.Kernel.Type {
-		return
-	}
-	nlog.Core().Info(fmt.Sprintf("auto-switching kernel (%s→%s, protocol=%s)",
-		s.cfg.Kernel.Type, resolved, protocol))
-	// Stop the old kernel if it is running before replacing it.
-	if s.kernel.IsRunning() {
-		s.kernel.Stop()
-	}
-	s.cfg.Kernel.Type = resolved
-	switch resolved {
-	case "singbox":
-		s.kernel = singbox.New(s.cfg.Kernel)
-	case "mihomo":
-		s.kernel = mihomo.New(s.cfg.Kernel)
-	case "xray":
-		s.kernel = xray.New(s.cfg.Kernel)
-	}
-	// Re-apply speed/device limit functions on the new kernel.
-	s.kernel.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
-	s.kernel.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
+	// xray supports all protocols, no kernel switching needed
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -621,6 +587,30 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 			s.kernel.UpdateGlobalDevices(event.DeviceUsers)
 		}
 
+	case controlplane.EventSyncUpgrade:
+		// Remote upgrade: run fbctl upgrade in background
+		version := event.DeltaAction
+		if version == "" {
+			version = "latest"
+		}
+		nlog.Core().Info(fmt.Sprintf("remote upgrade requested, version: %s", version))
+		go func() {
+			cmd := exec.Command("fbctl", "upgrade", "--version", version)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				nlog.Core().Error(fmt.Sprintf("remote upgrade failed: %v, output: %s", err, string(out)))
+			} else {
+				nlog.Core().Info(fmt.Sprintf("remote upgrade completed: %s", string(out)))
+			}
+		}()
+
+	case controlplane.EventSyncRestart:
+		// Remote restart: exit process (systemd will auto-restart)
+		nlog.Core().Info("remote restart requested, shutting down process")
+		go func() {
+			time.Sleep(2 * time.Second)
+			s.kernel.Stop()
+			os.Exit(0)
+		}()
 	default:
 		nlog.Core().Debug(fmt.Sprintf("unknown ws event: %v", event.Type))
 	}
@@ -1202,9 +1192,9 @@ func validateNodeRuntime(kcfgSupported []string, spec *model.NodeSpec, tls kerne
 		return fmt.Errorf("node spec is nil")
 	}
 	if !containsString(kcfgSupported, spec.Protocol) {
-		return fmt.Errorf("protocol %q is not supported by kernel %q", spec.Protocol, model.ResolveKernelType(spec.Protocol))
+		return fmt.Errorf("protocol %q is not supported", spec.Protocol)
 	}
-	if err := validateTLSRequirements(spec, tls, model.ResolveKernelType(spec.Protocol)); err != nil {
+	if err := validateTLSRequirements(spec, tls); err != nil {
 		return err
 	}
 	if err := validateRuntimeCertConfig(spec); err != nil {
@@ -1213,7 +1203,7 @@ func validateNodeRuntime(kcfgSupported []string, spec *model.NodeSpec, tls kerne
 	return nil
 }
 
-func validateTLSRequirements(spec *model.NodeSpec, tls kernel.TLSCert, kernelType string) error {
+func validateTLSRequirements(spec *model.NodeSpec, tls kernel.TLSCert) error {
 	needsCert := false
 	switch spec.Protocol {
 	case "hysteria", "hysteria2", "tuic", "anytls", "trusttunnel":
@@ -1227,7 +1217,7 @@ func validateTLSRequirements(spec *model.NodeSpec, tls kernel.TLSCert, kernelTyp
 		return fmt.Errorf("protocol %q requires TLS certificate files", spec.Protocol)
 	}
 	if spec.TLS == 2 {
-		if err := validateRealityRequirements(spec, kernelType); err != nil {
+		if err := validateRealityRequirements(spec); err != nil {
 			return err
 		}
 	}
@@ -1276,7 +1266,7 @@ func validateRuntimeCertConfig(spec *model.NodeSpec) error {
 	return nil
 }
 
-func validateRealityRequirements(spec *model.NodeSpec, _ string) error {
+func validateRealityRequirements(spec *model.NodeSpec) error {
 	if spec.TLSSettings == nil {
 		return fmt.Errorf("reality tls requires tls_settings")
 	}

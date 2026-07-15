@@ -8,8 +8,6 @@
 #   node_id: 1
 
 # ── Multiple instances ──
-# kernel:
-#   type: "singbox"
 # log:
 #   level: "info"
 # instances:

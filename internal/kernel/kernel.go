@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/model"
 	"golang.org/x/time/rate"
 )
 
@@ -40,7 +40,7 @@ func (t TLSCert) HasCert() bool {
 // and non-disruptive — they MUST NOT restart listeners or drop existing
 // connections. Only Start and Reload may (re)bind ports.
 //
-// Implementors: singbox.SingBox, xray.Xray
+// Implementors: xray.Xray
 type Kernel interface {
 	// ─── Identity ───────────────────────────────────────────────────────
 	// Name returns the kernel identifier (e.g. "sing-box", "xray").

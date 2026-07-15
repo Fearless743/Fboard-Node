@@ -3,7 +3,7 @@ package model
 import (
 	"testing"
 
-	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/config"
 )
 
 func TestNodeSpecFromStandalone(t *testing.T) {

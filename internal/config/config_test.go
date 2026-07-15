@@ -25,7 +25,6 @@ panel:
   node_id: 5
   node_type: "v2ray"
 kernel:
-  type: singbox
   log_level: warn
 log:
   level: debug
@@ -280,7 +279,6 @@ standalone:
     protocol: "trojan"
     server_port: 443
 kernel:
-  type: singbox
 `)
 	_, err := Load(path)
 	if err == nil {
@@ -323,14 +321,12 @@ instances:
       token_env: "PANEL_A_TOKEN"
       node_id: 1
     kernel:
-      type: singbox
   - panel:
       url: "https://panel-b.example.com"
     machine:
       machine_id: 2
       token_env: "PANEL_B_MACHINE_TOKEN"
     kernel:
-      type: singbox
 `)
 	t.Setenv("PANEL_A_TOKEN", "token-a")
 	t.Setenv("PANEL_B_MACHINE_TOKEN", "token-b")
@@ -358,7 +354,7 @@ instances:
 
 func TestConfig_AutoInstanceIDStable(t *testing.T) {
 	cfg := &Config{Panel: PanelConfig{URL: "https://Panel.Example.com/", NodeID: 1, Token: "tok"}}
-	cfg.setDefaultsFrom("/etc/xboard-node")
+	cfg.setDefaultsFrom("/etc/fboard-node")
 	id1, err := cfg.AutoInstanceID()
 	if err != nil {
 		t.Fatalf("AutoInstanceID: %v", err)

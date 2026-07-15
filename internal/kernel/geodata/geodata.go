@@ -8,14 +8,12 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/fearless743/fboard-node/internal/nlog"
 )
 
 const (
-	singboxGeoIPURL   = "https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db"
-	singboxGeoSiteURL = "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db"
-	xrayGeoIPURL      = "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-	xrayGeoSiteURL    = "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+	xrayGeoIPURL   = "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+	xrayGeoSiteURL = "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
 )
 
 var httpClient = &http.Client{Timeout: 10 * time.Minute}
@@ -31,20 +29,11 @@ func Ensure(dir string, needGeoIP, needGeoSite bool, kernelType string) error {
 	}
 
 	var files []entry
-	if kernelType == "singbox" {
-		if needGeoIP {
-			files = append(files, entry{"geoip.db", singboxGeoIPURL})
-		}
-		if needGeoSite {
-			files = append(files, entry{"geosite.db", singboxGeoSiteURL})
-		}
-	} else {
-		if needGeoIP {
-			files = append(files, entry{"geoip.dat", xrayGeoIPURL})
-		}
-		if needGeoSite {
-			files = append(files, entry{"geosite.dat", xrayGeoSiteURL})
-		}
+	if needGeoIP {
+		files = append(files, entry{"geoip.dat", xrayGeoIPURL})
+	}
+	if needGeoSite {
+		files = append(files, entry{"geosite.dat", xrayGeoSiteURL})
 	}
 
 	var firstErr error

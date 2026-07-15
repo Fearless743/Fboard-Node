@@ -6,14 +6,13 @@ import (
 	"encoding/pem"
 	"testing"
 
-	"github.com/cedar2025/xboard-node/internal/config"
-	"github.com/cedar2025/xboard-node/internal/kernel"
-	"github.com/cedar2025/xboard-node/internal/model"
-	"github.com/cedar2025/xboard-node/internal/panel"
+	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/kernel"
+	"github.com/fearless743/fboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/panel"
 )
 
 var testKernelCfg = config.KernelConfig{
-	Type:     "xray",
 	LogLevel: "warn",
 }
 

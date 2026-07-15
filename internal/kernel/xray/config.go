@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cedar2025/xboard-node/internal/config"
-	"github.com/cedar2025/xboard-node/internal/kernel"
-	"github.com/cedar2025/xboard-node/internal/model"
-	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/kernel"
+	"github.com/fearless743/fboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/nlog"
 )
 
 // M is a shorthand for building JSON-like maps
@@ -89,9 +89,9 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	if inbound != nil {
 		cfg["inbounds"] = []M{inbound}
 	} else {
-		nlog.Core().Warn("xray: unsupported protocol, no inbound configured — node will not accept connections",
+		nlog.Core().Warn("xray: unsupported protocol, no inbound configured",
 			"protocol", nc.Protocol,
-			"supported", "vmess, vless, trojan, shadowsocks, hysteria, socks, http")
+			"supported", "vmess, vless, trojan, shadowsocks, hysteria, socks, http, tuic, anytls, naive, mieru")
 	}
 
 	// Merge panel routes and static config routes
@@ -197,8 +197,8 @@ func mergeCustomXrayRouting(cfg M, customRouting map[string]any) {
 	}
 }
 
-func xrayLogLevel(singboxLevel string) string {
-	switch singboxLevel {
+func xrayLogLevel(level string) string {
+	switch level {
 	case "trace", "debug":
 		return "debug"
 	case "info":
@@ -246,6 +246,14 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 		return buildHTTP(base, nc, users, tc)
 	case "hysteria":
 		return buildHysteria(base, nc, users, tc)
+	case "tuic":
+		return buildTUIC(base, nc, users, tc)
+	case "anytls":
+		return buildAnyTLS(base, nc, users, tc)
+	case "naive":
+		return buildNaive(base, nc, users, tc)
+	case "mieru":
+		return buildMieru(base, nc, users)
 	default:
 		return nil
 	}
@@ -460,6 +468,7 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 		},
 	}
 
+	finalMask := M{}
 	if nc.UpMbps > 0 || nc.DownMbps > 0 {
 		quicParams := M{}
 		if nc.UpMbps > 0 {
@@ -468,9 +477,21 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 		if nc.DownMbps > 0 {
 			quicParams["brutalDown"] = fmt.Sprintf("%d mbps", nc.DownMbps)
 		}
-		ss["finalMask"] = M{
-			"quicParams": quicParams,
-		}
+		finalMask["quicParams"] = quicParams
+	}
+	// Hysteria2 salamander UDP obfuscation via finalmask.
+	if strings.EqualFold(nc.Obfs, "salamander") && nc.ObfsPassword != "" {
+		finalMask["udp"] = []M{{
+			"type": "salamander",
+			"settings": M{
+				"password": nc.ObfsPassword,
+			},
+		}}
+	} else if nc.Obfs != "" && !strings.EqualFold(nc.Obfs, "salamander") {
+		nlog.Core().Warn("xray hysteria: unsupported obfs type, only salamander is supported", "obfs", nc.Obfs)
+	}
+	if len(finalMask) > 0 {
+		ss["finalMask"] = finalMask
 	}
 
 	if tc.HasCert() {
@@ -479,10 +500,23 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 			"certificate": []string{string(tc.CertPEM)},
 			"key":         []string{string(tc.KeyPEM)},
 		}
-		ss["tlsSettings"] = M{
+		tlsSettings := M{
 			"certificates": []M{tlsCert},
 			"alpn":         []string{"h3"},
 		}
+		serverName := nc.ServerName
+		if serverName == "" && nc.Host != "" {
+			serverName = nc.Host
+		}
+		if nc.TLSSettings != nil {
+			if sn, ok := nc.TLSSettings["server_name"]; ok && sn != "" {
+				serverName = fmt.Sprintf("%v", sn)
+			}
+		}
+		if serverName != "" {
+			tlsSettings["serverName"] = serverName
+		}
+		ss["tlsSettings"] = tlsSettings
 	} else {
 		nlog.Core().Warn("hysteria requires TLS certificate files; configure cert_mode (self, file, http, dns, or content)")
 	}
@@ -933,4 +967,147 @@ func echPEMToBase64(data []byte) string {
 		return ""
 	}
 	return base64.StdEncoding.EncodeToString(block.Bytes)
+}
+
+func buildTUIC(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+	// TUIC v5: uuid + password; Fboard uses user UUID for both.
+	clients := make([]M, 0, len(users))
+	for _, u := range users {
+		clients = append(clients, M{
+			"uuid":     u.UUID,
+			"password": u.UUID,
+			"email":    userEmail(u.ID),
+		})
+	}
+	settings := M{"clients": clients}
+	if nc.CongestionControl != "" {
+		settings["congestion_control"] = nc.CongestionControl
+	}
+	base["settings"] = settings
+
+	// TUIC runs over its own QUIC transport (UDP), similar to hysteria.
+	ss := M{
+		"network": "tuic",
+		"tuicSettings": M{
+			"congestionControl": nc.CongestionControl,
+			"authTimeoutMs":     3000,
+			"maxIdleTimeoutMs":  15000,
+		},
+	}
+	if tc.HasCert() {
+		ss["security"] = "tls"
+		tlsCert := M{
+			"certificate": []string{string(tc.CertPEM)},
+			"key":         []string{string(tc.KeyPEM)},
+		}
+		alpn := []string{"h3"}
+		if nc.TLSSettings != nil {
+			if v, ok := nc.TLSSettings["alpn"]; ok {
+				switch a := v.(type) {
+				case []interface{}:
+					alpn = alpn[:0]
+					for _, item := range a {
+						alpn = append(alpn, fmt.Sprintf("%v", item))
+					}
+				case []string:
+					alpn = a
+				}
+			}
+			if sn, ok := nc.TLSSettings["server_name"]; ok && sn != "" {
+				ss["tlsSettings"] = M{
+					"certificates": []M{tlsCert},
+					"alpn":         alpn,
+					"serverName":   sn,
+				}
+			}
+		}
+		if _, ok := ss["tlsSettings"]; !ok {
+			ss["tlsSettings"] = M{
+				"certificates": []M{tlsCert},
+				"alpn":         alpn,
+			}
+		}
+	} else {
+		nlog.Core().Warn("tuic requires TLS certificate; configure cert_mode (self, file, http, dns, or content)")
+	}
+	base["streamSettings"] = ss
+	return base
+}
+
+func buildAnyTLS(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+	clients := make([]M, 0, len(users))
+	for _, u := range users {
+		clients = append(clients, M{
+			"password": u.UUID,
+			"email":    userEmail(u.ID),
+		})
+	}
+	base["settings"] = M{"clients": clients}
+	if nc.PaddingScheme != "" {
+		base["settings"].(M)["padding_scheme"] = nc.PaddingScheme
+	}
+	// AnyTLS always runs over TLS. Panel anytls config exposes
+	// server_name/tls_settings but often omits top-level tls=1.
+	if nc.TLS == 0 {
+		nc.TLS = 1
+	}
+	applyStreamSettings(base, nc, tc)
+	ss, _ := base["streamSettings"].(M)
+	if security, ok := ss["security"].(string); !ok || (security != "tls" && security != "reality") {
+		if !tc.HasCert() {
+			nlog.Core().Warn("anytls requires TLS certificate; configure cert_mode (self, file, http, dns, or content)")
+		}
+		nc.TLS = 1
+		applyStreamSettings(base, nc, tc)
+	}
+	return base
+}
+
+func buildNaive(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+	accounts := make([]M, 0, len(users))
+	for _, u := range users {
+		accounts = append(accounts, M{
+			"user":  u.UUID,
+			"pass":  u.UUID,
+			"email": userEmail(u.ID),
+		})
+	}
+	base["settings"] = M{"accounts": accounts}
+	if nc.TLS == 1 {
+		applyStreamSettings(base, nc, tc)
+	}
+	return base
+}
+
+
+
+func buildMieru(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+	// Official mieru uses username+password; Fboard uses UUID for both.
+	clients := make([]M, 0, len(users))
+	for _, u := range users {
+		clients = append(clients, M{
+			"name":     u.UUID,
+			"password": u.UUID,
+			"email":    userEmail(u.ID),
+		})
+	}
+	settings := M{"clients": clients}
+	transport := nc.Transport
+	if transport == "" {
+		transport = "TCP"
+	}
+	settings["transport"] = transport
+	if nc.TrafficPattern != "" {
+		settings["traffic_pattern"] = nc.TrafficPattern
+	}
+	base["settings"] = settings
+	// Official mieru transport owns the listen socket.
+	base["streamSettings"] = M{
+		"network": "mieru",
+		"mieruSettings": M{
+			"transport":      transport,
+			"trafficPattern": nc.TrafficPattern,
+		},
+	}
+	return base
 }

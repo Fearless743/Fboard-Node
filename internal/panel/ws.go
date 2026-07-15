@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/fearless743/fboard-node/internal/nlog"
 	"github.com/gorilla/websocket"
 )
 
@@ -22,6 +22,8 @@ const (
 	WSEventSyncDevices   = "sync.devices"   // panel → node: global device state
 	WSEventSyncNodes     = "sync.nodes"     // panel → machine: node list changed
 	WSEventReportDevices = "report.devices" // node → panel: report device snapshot
+	WSEventSyncUpgrade   = "sync.upgrade"   // panel → node: upgrade binary
+	WSEventSyncRestart   = "sync.restart"   // panel → node: restart process
 )
 
 // WSEvent is a parsed data event delivered to the service layer.
@@ -77,6 +79,20 @@ type syncDevicesPayload struct {
 	Users     map[int][]string `json:"users"`
 	Timestamp int64            `json:"timestamp"`
 	NodeID    int              `json:"node_id"`
+}
+
+// syncUpgradePayload carries version info for remote upgrade.
+type syncUpgradePayload struct {
+	Version   string `json:"version"`
+	Timestamp int64  `json:"timestamp"`
+	NodeID    int    `json:"node_id"`
+}
+
+// syncRestartPayload carries restart request data.
+type syncRestartPayload struct {
+	RequestedNodeID int   `json:"requested_node_id"`
+	Timestamp       int64 `json:"timestamp"`
+	NodeID          int   `json:"node_id"`
 }
 
 // syncNodesPayload carries the updated node list for a machine.
@@ -349,6 +365,12 @@ func (w *WSClient) handleMessage(msg wsMessage) {
 	case WSEventSyncNodes:
 		w.handleDataEvent(msg)
 
+	case WSEventSyncUpgrade:
+		w.handleDataEvent(msg)
+
+	case WSEventSyncRestart:
+		w.handleDataEvent(msg)
+
 	default:
 		nlog.Core().Debug("ws unknown event", "event", msg.Event)
 	}
@@ -437,6 +459,24 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 			return
 		}
 		event.Nodes = p.Nodes
+
+	case WSEventSyncUpgrade:
+		nlog.Core().Info("ws remote upgrade event received")
+		var p syncUpgradePayload
+		if err := decodeData(msg.Data, &p); err != nil {
+			nlog.Core().Warn("ws: cannot decode upgrade payload", "error", err)
+			return
+		}
+		event.DeltaAction = p.Version
+
+	case WSEventSyncRestart:
+		nlog.Core().Info("ws remote restart event received")
+		var p syncRestartPayload
+		if err := decodeData(msg.Data, &p); err != nil {
+			nlog.Core().Warn("ws: cannot decode restart payload", "error", err)
+			return
+		}
+		_ = p
 	}
 
 	w.onEvent(event)

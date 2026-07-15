@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/cedar2025/xboard-node/internal/config"
-	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/model"
 	appstats "github.com/xtls/xray-core/app/stats"
 	xrayCore "github.com/xtls/xray-core/core"
 	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
@@ -44,7 +44,7 @@ func newStatsBackedXray(t *testing.T, users []model.UserSpec, ld *LimitDispatche
 	if err := inst.AddFeature(mgr); err != nil {
 		t.Fatalf("Instance.AddFeature(stats) error = %v", err)
 	}
-	x := New(config.KernelConfig{Type: "xray"})
+	x := New(config.KernelConfig{})
 	x.instance = inst
 	x.limitDispatcher = ld
 	x.users = users
@@ -118,7 +118,7 @@ func TestXrayGetUserTrafficUsesBuiltInStatsAndDispatcherState(t *testing.T) {
 }
 
 func TestXrayUpdateDispatcherLimitsPropagatesDeviceMetadata(t *testing.T) {
-	x := New(config.KernelConfig{Type: "xray"})
+	x := New(config.KernelConfig{})
 	ld := newTestDispatcher()
 	x.limitDispatcher = ld
 
@@ -141,7 +141,7 @@ func TestXrayUpdateDispatcherLimitsPropagatesDeviceMetadata(t *testing.T) {
 }
 
 func TestXraySetSpeedLimitFuncUsesPatchedCorePath(t *testing.T) {
-	x := New(config.KernelConfig{Type: "xray"})
+	x := New(config.KernelConfig{})
 	called := false
 
 	x.SetSpeedLimitFunc(func(string) *rate.Limiter {
@@ -164,7 +164,7 @@ func TestXraySetSpeedLimitFuncUsesPatchedCorePath(t *testing.T) {
 
 
 func TestXrayCapabilities(t *testing.T) {
-	x := New(config.KernelConfig{Type: "xray"})
+	x := New(config.KernelConfig{})
 	caps := x.Capabilities()
 	if !caps.PerUserSpeedLimit || !caps.DeviceLimit || !caps.BuiltInTrafficStats || !caps.AliveIPTracking {
 		t.Fatalf("unexpected positive xray capabilities: %+v", caps)
@@ -181,7 +181,7 @@ func TestXrayUpdateBandwidthLimitsWritesPatchedCoreFeature(t *testing.T) {
 	if err := inst.AddFeature(bm); err != nil {
 		t.Fatalf("Instance.AddFeature(bandwidth) error = %v", err)
 	}
-	x := New(config.KernelConfig{Type: "xray"})
+	x := New(config.KernelConfig{})
 	x.instance = inst
 	x.updateBandwidthLimits([]model.UserSpec{{ID: 1, UUID: "uuid-1", SpeedLimit: 8}})
 	lim := bm.GetUserLimiter(userEmail(1))
@@ -197,7 +197,7 @@ func TestXrayUpdateBandwidthLimitsUsesSpeedLimitFunc(t *testing.T) {
 	if err := inst.AddFeature(bm); err != nil {
 		t.Fatalf("Instance.AddFeature(bandwidth) error = %v", err)
 	}
-	x := New(config.KernelConfig{Type: "xray"})
+	x := New(config.KernelConfig{})
 	x.instance = inst
 	x.users = []model.UserSpec{{ID: 1, UUID: "uuid-1", SpeedLimit: 8}}
 	shared := rate.NewLimiter(7, 7)
@@ -220,7 +220,7 @@ func TestXrayUpdateBandwidthLimitsFallsBackToUserSpeed(t *testing.T) {
 	if err := inst.AddFeature(bm); err != nil {
 		t.Fatalf("Instance.AddFeature(bandwidth) error = %v", err)
 	}
-	x := New(config.KernelConfig{Type: "xray"})
+	x := New(config.KernelConfig{})
 	x.instance = inst
 	x.users = []model.UserSpec{{ID: 2, UUID: "uuid-2", SpeedLimit: 16}}
 	x.updateBandwidthLimits(nil)
@@ -231,7 +231,7 @@ func TestXrayUpdateBandwidthLimitsFallsBackToUserSpeed(t *testing.T) {
 
 
 func TestXrayUpdateUsersLimitOnlyRefreshesDispatcherAndBandwidth(t *testing.T) {
-	x := New(config.KernelConfig{Type: "xray"})
+	x := New(config.KernelConfig{})
 	ld := newTestDispatcher()
 	inst := new(xrayCore.Instance)
 	bm := featurebandwidth.New()
@@ -258,7 +258,7 @@ func TestXrayUpdateUsersLimitOnlyRefreshesDispatcherAndBandwidth(t *testing.T) {
 }
 
 func TestXrayRemoveUsersStopsKernelWhenLastUserRemoved(t *testing.T) {
-	x := New(config.KernelConfig{Type: "xray"})
+	x := New(config.KernelConfig{})
 	x.instance = new(xrayCore.Instance)
 	ld := newTestDispatcher()
 	x.limitDispatcher = ld

@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/fearless743/fboard-node/internal/nlog"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
@@ -118,26 +118,24 @@ type WSConfig struct {
 }
 
 type KernelConfig struct {
-	Type      string `yaml:"-"` // resolved at runtime from protocol (xray or singbox)
 	ConfigDir string `yaml:"config_dir"`
 	LogLevel  string `yaml:"log_level"`
 
-	// GeoDataDir is the directory that contains GeoIP/GeoSite database files.
-	// For sing-box: geoip.db and geosite.db (geoip2-format).
-	// For xray:     geoip.dat and geosite.dat.
-	// Defaults to config_dir when empty. You only need to set this if your
-	// geo database files live somewhere other than config_dir.
+	// GeoDataDir is the directory that contains GeoIP/GeoSite database files
+	// (geoip.dat and geosite.dat). Defaults to config_dir when empty.
+	// You only need to set this if your geo database files live somewhere
+	// other than config_dir.
 	GeoDataDir string `yaml:"geo_data_dir"`
 
-	// CustomOutbound adds outbound entries to the generated kernel config.
-	// Each item is a raw kernel-native outbound object (sing-box or xray format).
+	// CustomOutbound adds outbound entries to the generated xray config.
+	// Each item is a raw xray-native outbound object.
 	CustomOutbound []map[string]any `yaml:"custom_outbound"`
 
-	// CustomRoute adds route rules to the generated kernel config.
-	// Each item is a raw kernel-native route rule object.
+	// CustomRoute adds route rules to the generated xray config.
+	// Each item is a raw xray-native route rule object.
 	CustomRoute []map[string]any `yaml:"custom_route"`
 
-	// CustomConfig is the path to a kernel-native config file (JSON or YAML)
+	// CustomConfig is the path to an xray-native config file (JSON or YAML)
 	// that is deep-merged into the auto-generated config. This enables full
 	// customization of dns, outbounds, endpoints, route, experimental, etc.
 	// Compatible with V2bX OriginalPath format.
@@ -303,7 +301,7 @@ func (rc *RootConfig) assignInstanceIDs() error {
 func configBaseDir(configPath string) string {
 	abs, err := filepath.Abs(configPath)
 	if err != nil {
-		return "/etc/xboard-node"
+		return "/etc/fboard-node"
 	}
 	return filepath.Dir(abs)
 }

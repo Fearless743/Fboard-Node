@@ -8,17 +8,17 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-APP_NAME="xboard-node"
-INSTALL_ROOT="/etc/xboard-node"
+APP_NAME="fboard-node"
+INSTALL_ROOT="/etc/fboard-node"
 BACKUP_DIR="${INSTALL_ROOT}/backups"
 INSTALL_META="${INSTALL_ROOT}/install-meta.json"
 CONFIG_FILE="${INSTALL_ROOT}/config.yml"
 CREDENTIALS_FILE="${INSTALL_ROOT}/credentials.env"
-BINARY_PATH="/usr/local/bin/xboard-node"
-SERVICE_NAME="xboard-node"
+BINARY_PATH="/usr/local/bin/fboard-node"
+SERVICE_NAME="fboard-node"
 SERVICE_PATH=""          # set by detect_init_system
 INIT_SYSTEM=""           # systemd | openrc
-CLI_PATH="/usr/local/bin/xbctl"
+CLI_PATH="/usr/local/bin/fbctl"
 INSTALLER_COPY_PATH="${INSTALL_ROOT}/install.sh"
 CLI_BINARY_SOURCE=""
 DEFAULT_HEALTH_PORT=65530
@@ -27,7 +27,7 @@ DEFAULT_ACTION="install"
 DEFAULT_RELEASE_VERSION="latest"
 DEFAULT_LOG_LEVEL="info"
 DEFAULT_KERNEL_LOG_LEVEL="warn"
-DEFAULT_DOWNLOAD_BASE="https://github.com/fearless743/xboard-node/releases"
+DEFAULT_DOWNLOAD_BASE="https://github.com/fearless743/fboard-node/releases"
 
 ACTION="${DEFAULT_ACTION}"
 MODE=""
@@ -96,8 +96,8 @@ load_health_port_from_config() {
 rollback_install() {
     log_warn "Rolling back installation"
     if [ -n "$BACKUP_PATH" ] && [ -d "$BACKUP_PATH" ]; then
-        if [ -f "$BACKUP_PATH/xboard-node" ]; then
-            install -m 755 "$BACKUP_PATH/xboard-node" "$BINARY_PATH"
+        if [ -f "$BACKUP_PATH/fboard-node" ]; then
+            install -m 755 "$BACKUP_PATH/fboard-node" "$BINARY_PATH"
         else
             rm -f "$BINARY_PATH"
         fi
@@ -116,8 +116,8 @@ rollback_install() {
         else
             rm -f "$INSTALL_META"
         fi
-        if [ -f "$BACKUP_PATH/xbctl" ]; then
-            install -m 755 "$BACKUP_PATH/xbctl" "$CLI_PATH"
+        if [ -f "$BACKUP_PATH/fbctl" ]; then
+            install -m 755 "$BACKUP_PATH/fbctl" "$CLI_PATH"
         else
             rm -f "$CLI_PATH"
         fi
@@ -166,7 +166,7 @@ trap cleanup_tmp EXIT
 usage() {
     cat <<'HELP'
 
-  xboard-node Installer
+  fboard-node Installer
 
   ACTIONS:
     install      Install or reconcile the configured deployment (default)
@@ -192,13 +192,13 @@ usage() {
   OPTIONAL:
     --node-type, -T     Explicit node type for node mode
     --version           Release version or latest (default: latest)
-    --binary            Use a local xboard-node binary path instead of downloading
-    --xbctl-binary      Use a local xbctl binary path instead of downloading
+    --binary            Use a local fboard-node binary path instead of downloading
+    --fbctl-binary      Use a local fbctl binary path instead of downloading
     --health-port       Local health port (default: 65530, use 0 to disable)
     --gomemlimit        Runtime GOMEMLIMIT value, e.g. 256MiB
     --gogc              Runtime GOGC value, e.g. 50
     --force-reconfigure Overwrite an existing install even if mode/target changed
-    --purge             With uninstall, delete /etc/xboard-node too
+    --purge             With uninstall, delete /etc/fboard-node too
     --yes, -y           Non-interactive confirmation for destructive operations
 
   EXAMPLES:
@@ -250,7 +250,7 @@ parse_args() {
                 BINARY_SOURCE="$2"
                 shift 2
                 ;;
-            --xbctl-binary)
+            --fbctl-binary)
                 CLI_BINARY_SOURCE="$2"
                 shift 2
                 ;;
@@ -519,12 +519,12 @@ select_binary_source() {
         echo "$BINARY_PATH"
         return
     fi
-    if [ -f "./xboard-node" ]; then
-        echo "./xboard-node"
+    if [ -f "./fboard-node" ]; then
+        echo "./fboard-node"
         return
     fi
-    if [ -f "./xboard-node-linux-${ARCH}" ]; then
-        echo "./xboard-node-linux-${ARCH}"
+    if [ -f "./fboard-node-linux-${ARCH}" ]; then
+        echo "./fboard-node-linux-${ARCH}"
         return
     fi
     echo ""
@@ -540,14 +540,14 @@ resolve_download_url() {
 }
 
 stage_binary() {
-    local staged="$TMP_DIR/xboard-node"
+    local staged="$TMP_DIR/fboard-node"
     local local_src
     local_src=$(select_binary_source)
     if [ -n "$local_src" ]; then
         log_step "Using local binary: ${local_src}"
         cp "$local_src" "$staged"
     else
-        resolve_download_url "xboard-node-linux-${ARCH}"
+        resolve_download_url "fboard-node-linux-${ARCH}"
         log_step "Downloading binary: ${DOWNLOAD_URL}"
         if ! curl -fsSL "$DOWNLOAD_URL" -o "$staged"; then
             log_error "Failed to download binary from ${DOWNLOAD_URL}"
@@ -561,37 +561,37 @@ stage_binary() {
     fi
 }
 
-stage_xbctl() {
-    local staged="$TMP_DIR/xbctl"
+stage_fbctl() {
+    local staged="$TMP_DIR/fbctl"
     local local_src=""
     if [ -n "$CLI_BINARY_SOURCE" ]; then
         if [ ! -f "$CLI_BINARY_SOURCE" ]; then
-            log_error "xbctl binary source not found: $CLI_BINARY_SOURCE"
+            log_error "fbctl binary source not found: $CLI_BINARY_SOURCE"
             exit 1
         fi
         local_src="$CLI_BINARY_SOURCE"
     elif [ "$ACTION" != "upgrade" ] && [ -x "$CLI_PATH" ] && "$CLI_PATH" version >/dev/null 2>&1; then
-        log_step "Reusing existing xbctl: ${CLI_PATH}"
+        log_step "Reusing existing fbctl: ${CLI_PATH}"
         local_src="$CLI_PATH"
-    elif [ -f "./xbctl" ]; then
-        local_src="./xbctl"
-    elif [ -f "./xbctl-linux-${ARCH}" ]; then
-        local_src="./xbctl-linux-${ARCH}"
+    elif [ -f "./fbctl" ]; then
+        local_src="./fbctl"
+    elif [ -f "./fbctl-linux-${ARCH}" ]; then
+        local_src="./fbctl-linux-${ARCH}"
     fi
     if [ -n "$local_src" ]; then
-        log_step "Using local xbctl binary: ${local_src}"
+        log_step "Using local fbctl binary: ${local_src}"
         cp "$local_src" "$staged"
     else
-        resolve_download_url "xbctl-linux-${ARCH}"
-        log_step "Downloading xbctl: ${DOWNLOAD_URL}"
+        resolve_download_url "fbctl-linux-${ARCH}"
+        log_step "Downloading fbctl: ${DOWNLOAD_URL}"
         if ! curl -fsSL "$DOWNLOAD_URL" -o "$staged"; then
-            log_error "Failed to download xbctl from ${DOWNLOAD_URL}"
+            log_error "Failed to download fbctl from ${DOWNLOAD_URL}"
             exit 1
         fi
     fi
     chmod +x "$staged"
     if ! "$staged" version > /dev/null 2>&1; then
-        log_error "Downloaded xbctl failed version check"
+        log_error "Downloaded fbctl failed version check"
         exit 1
     fi
 }
@@ -631,8 +631,8 @@ render_config() {
     fi
 
     local output
-    output=$("$TMP_DIR/xbctl" "${init_args[@]}") || {
-        log_error "xbctl config init failed"
+    output=$("$TMP_DIR/fbctl" "${init_args[@]}") || {
+        log_error "fbctl config init failed"
         exit 1
     }
 
@@ -651,8 +651,8 @@ render_service() {
 _render_systemd_service() {
     cat >"$TMP_DIR/service-file" <<EOF_UNIT
 [Unit]
-Description=Xboard Node Backend
-Documentation=https://github.com/cedar2025/xboard-node
+Description=Fboard Node Backend
+Documentation=https://github.com/Fearless743/Fboard-Node
 After=network-online.target
 Wants=network-online.target
 
@@ -678,13 +678,13 @@ _render_openrc_service() {
     cat >"$TMP_DIR/service-file" <<'EOF_RC'
 #!/sbin/openrc-run
 
-description="Xboard Node Backend"
-command="/usr/local/bin/xboard-node"
-command_args="-c /etc/xboard-node/config.yml"
+description="Fboard Node Backend"
+command="/usr/local/bin/fboard-node"
+command_args="-c /etc/fboard-node/config.yml"
 command_background=true
-pidfile="/run/xboard-node.pid"
-output_log="/var/log/xboard-node.log"
-error_log="/var/log/xboard-node.log"
+pidfile="/run/fboard-node.pid"
+output_log="/var/log/fboard-node.log"
+error_log="/var/log/fboard-node.log"
 
 depend() {
     need net
@@ -693,9 +693,9 @@ depend() {
 
 start_pre() {
     # Load credentials if present and explicitly export them
-    if [ -f /etc/xboard-node/credentials.env ]; then
+    if [ -f /etc/fboard-node/credentials.env ]; then
         set -a
-        . /etc/xboard-node/credentials.env
+        . /etc/fboard-node/credentials.env
         set +a
     fi
     # Ensure log file exists
@@ -708,10 +708,10 @@ backup_existing_state() {
     BACKUP_PATH="${BACKUP_DIR}/$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$BACKUP_PATH"
     if [ -x "$BINARY_PATH" ]; then
-        cp "$BINARY_PATH" "$BACKUP_PATH/xboard-node"
+        cp "$BINARY_PATH" "$BACKUP_PATH/fboard-node"
     fi
     if [ -x "$CLI_PATH" ]; then
-        cp "$CLI_PATH" "$BACKUP_PATH/xbctl"
+        cp "$CLI_PATH" "$BACKUP_PATH/fbctl"
     fi
     if [ -f "$CONFIG_FILE" ]; then
         cp "$CONFIG_FILE" "$BACKUP_PATH/config.yml"
@@ -738,15 +738,15 @@ stop_existing_service() {
 
 install_staged_files() {
     stop_existing_service
-    install -m 755 "$TMP_DIR/xboard-node" "$BINARY_PATH"
+    install -m 755 "$TMP_DIR/fboard-node" "$BINARY_PATH"
     install -m 600 "$TMP_DIR/config.yml" "$CONFIG_FILE"
     install -m 600 "$TMP_DIR/credentials.env" "$CREDENTIALS_FILE"
     install -m 644 "$TMP_DIR/install-meta.json" "$INSTALL_META"
     if [ -f "$0" ] && [ "$(realpath "$0")" != "$(realpath "$INSTALLER_COPY_PATH" 2>/dev/null || echo "$INSTALLER_COPY_PATH")" ]; then
         install -m 755 "$0" "$INSTALLER_COPY_PATH"
     fi
-    install -m 755 "$TMP_DIR/xbctl" "$CLI_PATH"
-    ln -sf "$CLI_PATH" /usr/bin/xbctl 2>/dev/null || true
+    install -m 755 "$TMP_DIR/fbctl" "$CLI_PATH"
+    ln -sf "$CLI_PATH" /usr/bin/fbctl 2>/dev/null || true
     if [ "$INIT_SYSTEM" = "systemd" ]; then
         install -m 644 "$TMP_DIR/service-file" "$SERVICE_PATH"
         systemctl daemon-reload
@@ -781,8 +781,8 @@ wait_for_health() {
 show_recent_logs() {
     if [ "$INIT_SYSTEM" = "systemd" ] && command -v journalctl >/dev/null 2>&1; then
         journalctl -u "${SERVICE_NAME}.service" -n 30 --no-pager || true
-    elif [ -f /var/log/xboard-node.log ]; then
-        tail -n 30 /var/log/xboard-node.log || true
+    elif [ -f /var/log/fboard-node.log ]; then
+        tail -n 30 /var/log/fboard-node.log || true
     fi
 }
 
@@ -802,7 +802,7 @@ perform_install() {
     TMP_DIR=$(mktemp -d)
     ensure_dirs
     stage_binary
-    stage_xbctl
+    stage_fbctl
     render_config
     render_service
     backup_existing_state
@@ -816,7 +816,7 @@ perform_install() {
     if [ "$HEALTH_ENABLED" -eq 1 ]; then
         log_info "Health: http://127.0.0.1:${HEALTH_PORT}/healthz"
     fi
-    log_info "CLI: ${CLI_PATH}  (run '${CLI_PATH} list' if xbctl is not in PATH)"
+    log_info "CLI: ${CLI_PATH}  (run '${CLI_PATH} list' if fbctl is not in PATH)"
 }
 
 perform_upgrade() {
@@ -829,12 +829,12 @@ perform_upgrade() {
     TMP_DIR=$(mktemp -d)
     ensure_dirs
     stage_binary
-    stage_xbctl
+    stage_fbctl
     render_service
     backup_existing_state
-    install -m 755 "$TMP_DIR/xboard-node" "$BINARY_PATH"
-    install -m 755 "$TMP_DIR/xbctl" "$CLI_PATH"
-    ln -sf "$CLI_PATH" /usr/bin/xbctl 2>/dev/null || true
+    install -m 755 "$TMP_DIR/fboard-node" "$BINARY_PATH"
+    install -m 755 "$TMP_DIR/fbctl" "$CLI_PATH"
+    ln -sf "$CLI_PATH" /usr/bin/fbctl 2>/dev/null || true
     if [ "$INIT_SYSTEM" = "systemd" ]; then
         install -m 644 "$TMP_DIR/service-file" "$SERVICE_PATH"
         systemctl daemon-reload
@@ -874,7 +874,7 @@ perform_uninstall() {
     fi
     rm -f "$BINARY_PATH"
     rm -f "$CLI_PATH"
-    rm -f /usr/bin/xbctl 2>/dev/null || true
+    rm -f /usr/bin/fbctl 2>/dev/null || true
     if [ "$PURGE" -eq 1 ]; then
         rm -rf "$INSTALL_ROOT"
         log_info "Removed ${INSTALL_ROOT}"
@@ -888,7 +888,7 @@ perform_uninstall() {
 perform_status() {
     detect_current_state
     echo
-    echo -e "${BOLD}xboard-node install status${NC}"
+    echo -e "${BOLD}fboard-node install status${NC}"
     echo "  state:   ${CURRENT_STATE}"
     if [ -f "$INSTALL_META" ]; then
         echo "  meta:    ${INSTALL_META}"

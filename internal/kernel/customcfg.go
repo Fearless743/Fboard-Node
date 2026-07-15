@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/fearless743/fboard-node/internal/nlog"
 	"gopkg.in/yaml.v3"
 )
 
