@@ -431,7 +431,7 @@ func TestBuildConfig_StatsEnabled(t *testing.T) {
 		t.Error("stats not enabled")
 	}
 
-	// Verify policy enables user stats
+	// Verify policy enables user stats and memory-oriented defaults.
 	policy := parsed["policy"].(map[string]interface{})
 	levels := policy["levels"].(map[string]interface{})
 	level0 := levels["0"].(map[string]interface{})
@@ -441,6 +441,84 @@ func TestBuildConfig_StatsEnabled(t *testing.T) {
 	}
 	if v, ok := level0["statsUserDownlink"]; !ok || v != true {
 		t.Error("statsUserDownlink not enabled")
+	}
+	// bufferSize is in KiB; default 16 keeps per-conn pipe caps low.
+	if v, ok := level0["bufferSize"]; !ok {
+		t.Error("bufferSize not set")
+	} else {
+		switch n := v.(type) {
+		case int:
+			if n != 16 {
+				t.Errorf("bufferSize = %d, want 16", n)
+			}
+		case float64:
+			if int(n) != 16 {
+				t.Errorf("bufferSize = %v, want 16", n)
+			}
+		default:
+			t.Errorf("bufferSize type %T = %v, want 16", v, v)
+		}
+	}
+	system := policy["system"].(map[string]interface{})
+	for _, key := range []string{
+		"statsInboundUplink", "statsInboundDownlink",
+		"statsOutboundUplink", "statsOutboundDownlink",
+	} {
+		if v, ok := system[key]; ok && v == true {
+			t.Errorf("system.%s should be false to avoid per-conn CounterConnection wrappers", key)
+		}
+	}
+}
+
+func TestBuildConfig_BufferSizeOverride(t *testing.T) {
+	kcfg := config.KernelConfig{LogLevel: "warn", BufferSize: 64}
+	nc := panel.NodeConfig{Protocol: "vmess", ServerPort: 10086}
+	cfg := buildConfig(kcfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	level0 := cfg["policy"].(M)["levels"].(M)["0"].(M)
+	if level0["bufferSize"] != 64 {
+		t.Errorf("bufferSize = %v, want 64", level0["bufferSize"])
+	}
+}
+
+func TestMergeCustomXrayPolicy_PartialOverride(t *testing.T) {
+	cfg := M{
+		"policy": M{
+			"levels": M{
+				"0": M{
+					"statsUserUplink":   true,
+					"statsUserDownlink": true,
+					"bufferSize":        16,
+				},
+			},
+			"system": M{
+				"statsInboundUplink": false,
+			},
+		},
+	}
+	mergeCustomXrayPolicy(cfg, map[string]any{
+		"levels": map[string]any{
+			"0": map[string]any{
+				"bufferSize": 128,
+				"connIdle":   60,
+			},
+		},
+		"system": map[string]any{
+			"statsInboundUplink": true,
+		},
+	})
+	level0 := cfg["policy"].(M)["levels"].(M)["0"].(M)
+	if level0["bufferSize"] != 128 {
+		t.Errorf("bufferSize = %v, want 128", level0["bufferSize"])
+	}
+	if level0["statsUserUplink"] != true {
+		t.Error("statsUserUplink should be preserved across partial policy merge")
+	}
+	if level0["connIdle"] != 60 {
+		t.Errorf("connIdle = %v, want 60", level0["connIdle"])
+	}
+	system := cfg["policy"].(M)["system"].(M)
+	if system["statsInboundUplink"] != true {
+		t.Error("system.statsInboundUplink should be overridden to true")
 	}
 }
 

@@ -16,6 +16,13 @@ machine:
 #   pull_interval: 60
 # kernel:
 #   log_level: "warn"
+#   # Per-connection xray pipe buffer in KiB (default 16). Raise for high-throughput links.
+#   # buffer_size: 16
+# runtime:
+#   # Default GOGC is 50 (more aggressive than Go's 100) for lower RSS under churn.
+#   # gogc: 50
+#   # Soft memory limit — GC becomes more aggressive near this cap.
+#   # gomemlimit: "512MiB"
 # health_port: 65530
 
 # Multiple panel machines in one process:

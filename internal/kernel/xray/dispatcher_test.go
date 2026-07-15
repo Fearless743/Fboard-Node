@@ -192,7 +192,7 @@ func TestLimitDispatcher_TrackLinkPreservesReader(t *testing.T) {
 	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1}, nil)
 
 	origReader := nopReader{}
-	origWriter := &closeTrackingWriter{Writer: buf.Discard, onClose: func() {}}
+	origWriter := buf.Discard
 	link := &transport.Link{Reader: origReader, Writer: origWriter}
 
 	ld.trackLink(link, email, "1.1.1.1", true)
