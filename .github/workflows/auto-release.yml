@@ -33,7 +33,7 @@ jobs:
           echo "base=$LATEST_TAG" >> "$GITHUB_OUTPUT"
 
           CHANGED=$(git diff --name-only "$LATEST_TAG"..HEAD -- \
-            cmd/xbctl/ cmd/xboard-node/ internal/ go.mod go.sum)
+            cmd/fbctl/ cmd/fboard-node/ cmd/xbctl/ cmd/xboard-node/ internal/ go.mod go.sum)
           if [ -n "$CHANGED" ]; then
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
             echo "Changed files:"

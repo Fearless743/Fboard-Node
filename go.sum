@@ -48,8 +48,8 @@ github.com/AzureAD/microsoft-authentication-library-for-go v1.4.2 h1:oygO0locgZJ
 github.com/AzureAD/microsoft-authentication-library-for-go v1.4.2/go.mod h1:wP83P5OoQ5p6ip3ScPr0BAq0BvuPAvacpEuSzyouqAI=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
-github.com/Fearless743/Xray-core v0.0.0-20260715044809-1db17a199c77 h1:mYkNCX8EXVB0FTvvkGBHfyHprP8sft32RirtVj7pbyQ=
-github.com/Fearless743/Xray-core v0.0.0-20260715044809-1db17a199c77/go.mod h1:pme9TLqnCWIGjCrD0M3Jh4UtJvz8GHXYzMfBYJXXLs0=
+github.com/Fearless743/Xray-core v0.0.0-20260715093513-a32460d8dc2e h1:hJFQ7hXbJT+GDWyxTJeABIoFJStvFkFqo2fnA3//Zgs=
+github.com/Fearless743/Xray-core v0.0.0-20260715093513-a32460d8dc2e/go.mod h1:pme9TLqnCWIGjCrD0M3Jh4UtJvz8GHXYzMfBYJXXLs0=
 github.com/OneOfOne/xxhash v1.2.2/go.mod h1:HSdplMjZKSmBqAxg5vPj2TmRDmfkzw+cTzAElWljhcU=
 github.com/PuerkitoBio/purell v1.1.0/go.mod h1:c11w/QuzBsJSee3cPx9rAFu61PvFxuPbtSwDGJws/X0=
 github.com/PuerkitoBio/purell v1.1.1 h1:WEQqlqaGbrPkxLJWfBwQmfEAE1Z7ONdDLqrN38tNFfI=
