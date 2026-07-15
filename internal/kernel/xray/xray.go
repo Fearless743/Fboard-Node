@@ -665,7 +665,7 @@ func (x *Xray) ensureGeoData(nc *model.NodeSpec) {
 		return
 	}
 	dir := x.cfg.GeoDataDir
-	if err := geodata.Ensure(dir, needIP, needSite, "xray"); err != nil {
+	if err := geodata.Ensure(dir, needIP, needSite); err != nil {
 		nlog.Core().Warn("geo database unavailable", "error", err)
 	}
 	os.Setenv("XRAY_LOCATION_ASSET", dir)

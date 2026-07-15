@@ -110,8 +110,8 @@ type WSClientConfig struct {
 }
 
 // WSClient connects to the panel's Workerman WS server using native WebSocket.
-// Authentication is done via query parameters (token + node_id) during the
-// WebSocket handshake — no separate auth step needed.
+// Authentication is done via query parameters (token + machine_id) during the
+// WebSocket handshake — no separate auth step needed. Per-node events carry node_id.
 type WSClient struct {
 	wsURL    string // base WS URL, e.g. ws://panel.example.com:8076
 	token    string
@@ -131,7 +131,8 @@ type WSClient struct {
 
 // NewWSClient creates a new WebSocket client.
 // wsURL is the base WebSocket URL (e.g. "ws://panel.example.com:8076").
-// token and nodeID are used for authentication via query parameters.
+// token authenticates the machine; MachineID must be set on cfg.
+// nodeID is retained for optional single-node status helpers.
 func NewWSClient(wsURL string, token string, nodeID int, cfg WSClientConfig, onEvent func(WSEvent), onStatus func(WSStatusChange), onPing func() map[string]interface{}) *WSClient {
 	// Apply defaults
 	if cfg.StatusInterval == 0 {
@@ -219,11 +220,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 	}
 	q := u.Query()
 	q.Set("token", w.token)
-	if w.cfg.MachineID > 0 {
-		q.Set("machine_id", strconv.Itoa(w.cfg.MachineID))
-	} else {
-		q.Set("node_id", strconv.Itoa(w.nodeID))
-	}
+	q.Set("machine_id", strconv.Itoa(w.cfg.MachineID))
 	u.RawQuery = q.Encode()
 
 	nlog.Core().Debug("ws connecting", "url", u.String())
@@ -488,7 +485,7 @@ func (w *WSClient) SendDeviceReport(devices map[int][]string) {
 }
 
 // SendDeviceReportForNode sends a device report tagged with a specific node_id.
-// nodeID == 0 omits the field (legacy single-node mode).
+// nodeID == 0 omits the field (machine-level message).
 func (w *WSClient) SendDeviceReportForNode(nodeID int, devices map[int][]string) {
 	if !w.connected.Load() {
 		return

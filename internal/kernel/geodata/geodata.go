@@ -18,7 +18,7 @@ const (
 
 var httpClient = &http.Client{Timeout: 10 * time.Minute}
 
-func Ensure(dir string, needGeoIP, needGeoSite bool, kernelType string) error {
+func Ensure(dir string, needGeoIP, needGeoSite bool) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create geo_data_dir %q: %w", dir, err)
 	}

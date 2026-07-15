@@ -1,3 +1,5 @@
+> 当前 fboard-node 仅支持 xray 内核。
+
 # Custom Outbounds
 
 ## Quick Example
@@ -25,7 +27,7 @@
 
 ## Supported Protocols
 
-| Protocol | Xray | Sing-box | Mihomo |
+| Protocol | Xray |
 |----------|------|----------|--------|
 | vmess | ✅ | ✅ | ✅ |
 | vless | ✅ | ✅ | ✅ |

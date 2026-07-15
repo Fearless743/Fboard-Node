@@ -7,13 +7,11 @@ import (
 	"github.com/fearless743/fboard-node/internal/config"
 )
 
-// ValidateNodeSpec validates the node spec.
+// ValidateNodeSpec validates the node spec against the fixed xray kernel capabilities.
 func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	if n == nil {
 		return nil
 	}
-
-	kernelType := "xray"
 
 	additionalOutboundSources, err := collectAdditionalOutboundTagSources(kcfg.CustomConfig, kcfg.CustomOutbound)
 	if err != nil {
@@ -24,10 +22,10 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	}
 	additionalTags := additionalTagNames(additionalOutboundSources)
 	availableTags := buildAvailableOutboundTags(n.CustomOutbounds, additionalTags)
-	if err := ValidateCustomOutboundsForKernel(n.CustomOutbounds, kernelType, additionalTags); err != nil {
+	if err := ValidateCustomOutboundsWithTags(n.CustomOutbounds, additionalTags); err != nil {
 		return fmt.Errorf("validate custom outbounds: %w", err)
 	}
-	if err := ValidateCustomRouteRules(n.CustomRouteRules, kernelType, availableTags); err != nil {
+	if err := ValidateCustomRouteRules(n.CustomRouteRules, availableTags); err != nil {
 		return fmt.Errorf("validate custom route rules: %w", err)
 	}
 	return nil

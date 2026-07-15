@@ -10,7 +10,6 @@ type NodeSpec struct {
 	NetworkSettings map[string]any
 	Routes          []RouteRule
 
-	KernelType       string
 	KernelLogLevel   string
 	CustomOutbounds  []OutboundConfig
 	CustomRoutes     []map[string]any

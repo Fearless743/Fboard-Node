@@ -93,17 +93,12 @@ type fileInstance struct {
 	Runtime    *fileRuntimeConfig `yaml:"runtime,omitempty"`
 	HealthPort int                `yaml:"health_port,omitempty"`
 	Machine    *fileMachineConfig `yaml:"machine,omitempty"`
-	Standalone map[string]any     `yaml:"standalone,omitempty"`
 	Cert       *config.CertConfig `yaml:"cert,omitempty"`
 	WS         *config.WSConfig   `yaml:"ws,omitempty"`
-	Nodes      []config.NodeEntry `yaml:"nodes,omitempty"`
 }
 
 type filePanelConfig struct {
-	URL      string `yaml:"url"`
-	TokenEnv string `yaml:"token_env,omitempty"`
-	NodeID   int    `yaml:"node_id,omitempty"`
-	NodeType string `yaml:"node_type,omitempty"`
+	URL string `yaml:"url"`
 }
 
 type fileMachineConfig struct {
@@ -141,7 +136,6 @@ type instanceSummary struct {
 	ID         string `json:"id"`
 	PanelURL   string `json:"panel_url"`
 	Mode       string `json:"mode"`
-	NodeID     *int   `json:"node_id"`
 	MachineID  *int   `json:"machine_id"`
 	HealthPort int    `json:"health_port"`
 }
@@ -194,12 +188,8 @@ func run(args []string) error {
 		return runHealth()
 	case "bind":
 		return runBind(args[1:])
-	case "bind-node":
-		return runBind(append([]string{"add-node"}, args[1:]...))
 	case "bind-machine":
 		return runBind(append([]string{"add-machine"}, args[1:]...))
-	case "unbind-node":
-		return runBind(append([]string{"remove-node"}, args[1:]...))
 	case "unbind-machine":
 		return runBind(append([]string{"remove-machine"}, args[1:]...))
 	case "start", "stop", "restart", "enable", "disable":
@@ -228,14 +218,12 @@ func printUsage() {
   fbctl list [--output text|json]
   fbctl instance list [--output text|json]
   fbctl instance get <id> [--output text|json]
-  fbctl config init --mode node|machine --panel-url URL --token TOKEN [flags]
+  fbctl config init --panel-url URL --token TOKEN --machine-id ID [flags]
   fbctl config health-port [--config PATH]
   fbctl service status|start|stop|restart|enable|disable|logs
   fbctl health
-  fbctl bind add-node --panel-url URL --token TOKEN --node-id ID [--node-type TYPE]
   fbctl bind add-machine --panel-url URL --token TOKEN --machine-id ID
   fbctl bind remove <instance-id>
-  fbctl bind remove-node --panel URL --node-id ID
   fbctl bind remove-machine --panel URL --machine-id ID
   fbctl upgrade [--version VERSION]
   fbctl uninstall [--purge] [--yes]
@@ -244,9 +232,7 @@ func printUsage() {
 shortcuts:
   fbctl start|stop|restart        = fbctl service start|stop|restart
   fbctl log|logs                  = fbctl service logs
-  fbctl bind-node ...             = fbctl bind add-node ...
   fbctl bind-machine ...          = fbctl bind add-machine ...
-  fbctl unbind-node ...           = fbctl bind remove-node ...
   fbctl unbind-machine ...        = fbctl bind remove-machine ...`)
 }
 
@@ -371,7 +357,7 @@ func runHealth() error {
 
 func runBind(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: fbctl bind <add-node|add-machine|remove-node|remove-machine> ...")
+		return errors.New("usage: fbctl bind <add-machine|remove-machine|remove> ...")
 	}
 	if err := ensureRoot("bind"); err != nil {
 		return err
@@ -379,16 +365,10 @@ func runBind(args []string) error {
 	sub := args[0]
 	rest := args[1:]
 	switch sub {
-	case "add-node":
-		return runBindAdd("node", rest)
+	case "add-node", "remove-node":
+		return errors.New("node mode has been removed; use add-machine / remove-machine")
 	case "add-machine":
 		return runBindAdd("machine", rest)
-	case "remove-node":
-		panel, nodeID, err := parseRemoveNodeArgs(rest)
-		if err != nil {
-			return err
-		}
-		return removeBinding(panel, nodeID, 0, "")
 	case "remove-machine":
 		panel, machineID, err := parseRemoveMachineArgs(rest)
 		if err != nil {
@@ -828,7 +808,7 @@ func removeBinding(panelURL string, nodeID int, machineID int, instanceID string
 		} else {
 			matched = strings.TrimSpace(inst.Panel.URL) == strings.TrimSpace(panelURL)
 			if nodeID > 0 {
-				matched = matched && !inst.IsMachineMode() && inst.Panel.NodeID == nodeID
+				return errors.New("node mode has been removed; use --machine-id")
 			}
 			if machineID > 0 {
 				matched = matched && inst.IsMachineMode() && inst.Machine != nil && inst.Machine.MachineID == machineID
@@ -843,9 +823,6 @@ func removeBinding(panelURL string, nodeID int, machineID int, instanceID string
 	if len(removed) == 0 {
 		if instanceID != "" {
 			return fmt.Errorf("binding not found: id=%s", instanceID)
-		}
-		if nodeID > 0 {
-			return fmt.Errorf("binding not found: panel=%s node_id=%d", panelURL, nodeID)
 		}
 		return fmt.Errorf("binding not found: panel=%s machine_id=%d", panelURL, machineID)
 	}
@@ -868,7 +845,7 @@ func removeBinding(panelURL string, nodeID int, machineID int, instanceID string
 		}
 		fmt.Printf("removed %d binding(s)\n", len(removed))
 		fmt.Println("All bindings removed. Service stopped.")
-		fmt.Println("Use 'fbctl bind add-node/add-machine' to add a new binding, or 'fbctl uninstall' to fully uninstall.")
+		fmt.Println("Use 'fbctl bind add-machine' to add a new binding, or 'fbctl uninstall' to fully uninstall.")
 		return nil
 	}
 
@@ -963,10 +940,7 @@ func writeRootConfig(path string, root *config.RootConfig) error {
 		fi := fileInstance{
 			ID: inst.InstanceID,
 			Panel: filePanelConfig{
-				URL:      inst.Panel.URL,
-				TokenEnv: inst.Panel.TokenEnv,
-				NodeID:   inst.Panel.NodeID,
-				NodeType: inst.Panel.NodeType,
+				URL: inst.Panel.URL,
 			},
 			Kernel: fileKernelConfig{
 				ConfigDir:    inst.Kernel.ConfigDir,
@@ -982,7 +956,7 @@ func writeRootConfig(path string, root *config.RootConfig) error {
 			},
 			HealthPort: inst.HealthPort,
 		}
-		if !inst.IsMachineMode() && (inst.Node.PushInterval != 0 || inst.Node.PullInterval != 0 || inst.Node.TrackInterval != 0 || inst.Node.DeviceReportInterval != 0) {
+		if inst.Node.PushInterval != 0 || inst.Node.PullInterval != 0 || inst.Node.TrackInterval != 0 || inst.Node.DeviceReportInterval != 0 {
 			fi.Node = &fileNodeConfig{
 				PushInterval:         inst.Node.PushInterval,
 				PullInterval:         inst.Node.PullInterval,
@@ -1001,17 +975,12 @@ func writeRootConfig(path string, root *config.RootConfig) error {
 				MachineID: inst.Machine.MachineID,
 				TokenEnv:  inst.Machine.TokenEnv,
 			}
-			fi.Panel.NodeID = 0
-			fi.Panel.NodeType = ""
 		}
 		if inst.Cert.CertMode != "" || inst.Cert.Domain != "" || inst.Cert.CertFile != "" || inst.Cert.AutoTLS {
 			fi.Cert = &inst.Cert
 		}
 		if inst.WS.StatusInterval != 0 || inst.WS.HandshakeTimeout != 0 || inst.WS.BackoffInitial != 0 {
 			fi.WS = &inst.WS
-		}
-		if len(inst.Nodes) > 0 {
-			fi.Nodes = inst.Nodes
 		}
 		out.Instances = append(out.Instances, fi)
 	}
@@ -1032,9 +1001,6 @@ func pruneCredentialKeys(path string, removed []config.Config) error {
 	}
 	removeKeys := map[string]struct{}{}
 	for _, inst := range removed {
-		if env := strings.TrimSpace(inst.Panel.TokenEnv); env != "" {
-			removeKeys[env] = struct{}{}
-		}
 		if inst.Machine != nil {
 			if env := strings.TrimSpace(inst.Machine.TokenEnv); env != "" {
 				removeKeys[env] = struct{}{}
@@ -1073,10 +1039,7 @@ func writeInstallMeta(path string, root *config.RootConfig) error {
 }
 
 func instanceMode(inst config.Config) string {
-	if inst.IsMachineMode() {
-		return "machine"
-	}
-	return "node"
+	return "machine"
 }
 
 func collectInstanceRows() ([]instanceRow, error) {
@@ -1100,7 +1063,7 @@ func collectRowsFromMeta() ([]instanceRow, error) {
 			ID:      inst.ID,
 			Mode:    inst.Mode,
 			Panel:   inst.PanelURL,
-			Target:  formatTarget(inst.NodeID, inst.MachineID),
+			Target:  formatTarget(nil, inst.MachineID),
 			Service: serviceStatus,
 			Health:  healthStatus,
 		})
@@ -1122,15 +1085,11 @@ func collectRowsFromConfig() ([]instanceRow, error) {
 	healthStatus := healthStatus()
 	rows := make([]instanceRow, 0, len(instances))
 	for _, inst := range instances {
-		mode := "node"
-		if inst.IsMachineMode() {
-			mode = "machine"
-		}
 		rows = append(rows, instanceRow{
 			ID:      inst.InstanceID,
-			Mode:    mode,
+			Mode:    "machine",
 			Panel:   inst.Panel.URL,
-			Target:  formatTarget(intPtr(inst.Panel.NodeID), machineIDPtr(inst)),
+			Target:  formatTarget(nil, machineIDPtr(inst)),
 			Service: serviceStatus,
 			Health:  healthStatus,
 		})
@@ -1228,9 +1187,7 @@ func instanceAwareHealth() string {
 }
 
 func formatTarget(nodeID *int, machineID *int) string {
-	if nodeID != nil && *nodeID > 0 {
-		return fmt.Sprintf("node_id=%d", *nodeID)
-	}
+	_ = nodeID
 	if machineID != nil && *machineID > 0 {
 		return fmt.Sprintf("machine_id=%d", *machineID)
 	}
@@ -1430,16 +1387,22 @@ func runConfigInit(args []string) error {
 	}
 
 	if mode == "" {
-		return errors.New("--mode is required (node or machine)")
+		mode = "machine"
+	}
+	if mode == "node" {
+		return errors.New("node mode has been removed; use machine mode (--machine-id)")
+	}
+	if mode != "machine" {
+		return fmt.Errorf("unsupported --mode %q (only machine is supported)", mode)
 	}
 	if panelURL == "" {
 		return errors.New("--panel-url is required")
 	}
-	if mode == "node" && nodeID <= 0 {
-		return errors.New("--node-id is required for node mode")
+	if machineID <= 0 {
+		return errors.New("--machine-id is required")
 	}
-	if mode == "machine" && machineID <= 0 {
-		return errors.New("--machine-id is required for machine mode")
+	if nodeID > 0 || nodeType != "" {
+		return errors.New("--node-id/--node-type have been removed; use --machine-id")
 	}
 
 	// Build the new instance.
@@ -1450,15 +1413,7 @@ func runConfigInit(args []string) error {
 		},
 		Log:        config.LogConfig{Level: "info", Output: "stdout"},
 		HealthPort: healthPort,
-	}
-
-	if mode == "machine" {
-		inst.Machine = &config.MachineConfig{MachineID: machineID}
-	} else {
-		inst.Panel.NodeID = nodeID
-		if nodeType != "" {
-			inst.Panel.NodeType = nodeType
-		}
+		Machine:    &config.MachineConfig{MachineID: machineID},
 	}
 
 	// Generate deterministic instance ID.
@@ -1474,14 +1429,8 @@ func runConfigInit(args []string) error {
 	inst.Kernel.ConfigDir = filepath.Join(installRoot, "instances", instanceID)
 
 	// Build credential env key.
-	envKey := "INSTANCE_" + strings.ToUpper(strings.ReplaceAll(instanceID, "-", "_"))
-	if mode == "machine" {
-		envKey += "_MACHINE_TOKEN"
-		inst.Machine.TokenEnv = envKey
-	} else {
-		envKey += "_API_KEY"
-		inst.Panel.TokenEnv = envKey
-	}
+	envKey := "INSTANCE_" + strings.ToUpper(strings.ReplaceAll(instanceID, "-", "_")) + "_MACHINE_TOKEN"
+	inst.Machine.TokenEnv = envKey
 
 	if gomemlimit != "" {
 		inst.Runtime.GoMemLimit = gomemlimit
@@ -1622,12 +1571,8 @@ func writeInstallMetaVersioned(path string, root *config.RootConfig, ver, latest
 			ID:         id,
 			PanelURL:   inst.Panel.URL,
 			Mode:       instanceMode(inst),
-			NodeID:     intPtr(inst.Panel.NodeID),
 			MachineID:  machineIDPtr(&inst),
 			HealthPort: inst.HealthPort,
-		}
-		if item.Mode == "machine" {
-			item.NodeID = nil
 		}
 		items = append(items, item)
 	}

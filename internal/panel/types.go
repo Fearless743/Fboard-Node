@@ -81,7 +81,7 @@ type MachineBaseConfig struct {
 	PullInterval int `json:"pull_interval"`
 }
 
-// NodeConfig is the response from GET /api/v1/server/UniProxy/config
+// NodeConfig is the response from GET /api/v2/server/config
 type NodeConfig struct {
 	// NodeID is populated in machine-mode WS events for routing.
 	NodeID          int                    `json:"node_id,omitempty"`
@@ -94,7 +94,6 @@ type NodeConfig struct {
 	Routes          []RouteRule            `json:"routes"`
 
 	// Kernel settings (Xboard extension)
-	KernelType       string            `json:"kernel_type,omitempty"`      // "xray" only
 	KernelLogLevel   string            `json:"kernel_log_level,omitempty"` // "info", "warn", etc.
 	CustomOutbounds  []OutboundConfig  `json:"custom_outbounds,omitempty"`
 	CustomRoutes     []map[string]any  `json:"custom_routes,omitempty"`

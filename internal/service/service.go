@@ -120,16 +120,6 @@ func (b *apiBackoff) onFailure() {
 	}
 }
 
-func New(cfg *config.Config) *Service {
-	var cp controlplane.ControlPlane
-	if cfg.IsStandalone() {
-		cp = controlplane.NewLocalControlPlane(cfg)
-	} else {
-		cp = controlplane.NewPanelControlPlane(cfg.Panel, cfg.WS, cfg.Kernel)
-	}
-	return newService(cfg, cp)
-}
-
 // NewWithControlPlane creates a Service with an externally-provided
 // ControlPlane. Used by the machine orchestrator to inject a
 // MachinePanelControlPlane with WS mux routing.
@@ -159,11 +149,6 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 		wsStatusCh:   make(chan controlplane.StatusChange, 4),
 		pullResults:  make(chan pullResult, 1),
 	}
-}
-
-// ensureKernelForProtocol is a no-op because xray supports all protocols.
-func (s *Service) ensureKernelForProtocol(protocol string) {
-	// xray supports all protocols, no kernel switching needed
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -286,7 +271,6 @@ func (s *Service) initialSetup(ctx context.Context) error {
 		}
 		return fmt.Errorf("initial config is nil")
 	}
-	s.ensureKernelForProtocol(bootstrap.Config.Protocol)
 	if err := validateNodeRuntime(s.kernel.Protocols(), bootstrap.Config, s.cert.TLSCert()); err != nil {
 		return err
 	}
@@ -542,7 +526,6 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if newConfigHash == s.lastConfigHash {
 			return
 		}
-		s.ensureKernelForProtocol(event.Config.Protocol)
 		if err := validateNodeRuntime(s.kernel.Protocols(), event.Config, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn("ws config validation failed, ignoring update", "error", err)
 			return
@@ -676,7 +659,6 @@ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 	}
 
 	if result.config != nil {
-		s.ensureKernelForProtocol(result.config.Protocol)
 		if err := validateNodeRuntime(s.kernel.Protocols(), result.config, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn("runtime config validation failed", "error", err)
 			result.config = nil

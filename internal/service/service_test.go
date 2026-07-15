@@ -232,7 +232,7 @@ func TestValidateNodeRuntimeAllowsSelfManagedTLSBeforeFilesExist(t *testing.T) {
 	}
 }
 
-func TestValidateNodeRuntimeAllowsSingboxRealityWithRequiredFields(t *testing.T) {
+func TestValidateNodeRuntimeAllowsRealityWithRequiredFields(t *testing.T) {
 	err := validateNodeRuntime( []string{"vless"}, &model.NodeSpec{
 		Protocol: "vless",
 		TLS:      2,
@@ -242,7 +242,7 @@ func TestValidateNodeRuntimeAllowsSingboxRealityWithRequiredFields(t *testing.T)
 		},
 	}, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
 	if err != nil {
-		t.Fatalf("expected sing-box reality validation to pass, got %v", err)
+		t.Fatalf("expected reality validation to pass, got %v", err)
 	}
 }
 

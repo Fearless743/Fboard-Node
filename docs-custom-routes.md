@@ -1,3 +1,5 @@
+> 当前 fboard-node 仅支持 xray 内核。
+
 # Custom Routes
 
 ## Quick Example
@@ -53,7 +55,7 @@
 
 ## Kernel Compatibility
 
-| Feature | Xray | Sing-box | Mihomo |
+| Feature | Xray |
 |---------|------|----------|--------|
 | All match conditions | ✅ | ✅ | ✅ |
 | direct / block / route | ✅ | ✅ | ✅ |
