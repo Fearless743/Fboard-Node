@@ -6,7 +6,7 @@ func OutboundSupportMatrix() map[string]KernelOutboundSupport {
 			Protocols: []string{
 				"vmess", "vless", "trojan", "shadowsocks",
 				"socks", "http", "wireguard",
-				"tuic", "hysteria2", "anytls", "naive", "mieru",
+				"tuic", "hysteria2", "anytls", "naive", "mieru", "sudoku",
 			},
 			Features: []string{
 				"tag",

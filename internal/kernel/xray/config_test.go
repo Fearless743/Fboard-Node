@@ -159,6 +159,18 @@ func TestBuildConfig_AllProtocols_ValidJSON(t *testing.T) {
 				ServerPort: 8080,
 			},
 		},
+		{
+			name: "sudoku",
+			nc: panel.NodeConfig{
+				Protocol:   "sudoku",
+				ServerPort: 8443,
+				ServerKey:  "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+				SudokuConfig: &panel.SudokuConfig{
+					AEADMethod: "chacha20-poly1305",
+					TableType:  "prefer_entropy",
+				},
+			},
+		},
 	}
 
 	for _, tc := range protocols {
@@ -607,5 +619,39 @@ func TestNormalizeSS2022Key(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildSudokuInbound(t *testing.T) {
+	padMin, padMax := 5, 15
+	pure := true
+	nc := &model.NodeSpec{
+		Protocol:   "sudoku",
+		ServerPort: 8443,
+		ServerKey:  "aabbccdd",
+		SudokuConfig: &model.SudokuConfig{
+			AEADMethod:         "chacha20-poly1305",
+			PaddingMin:         &padMin,
+			PaddingMax:         &padMax,
+			TableType:          "prefer_entropy",
+			EnablePureDownlink: &pure,
+			HTTPMaskMode:       "legacy",
+		},
+	}
+	users := []model.UserSpec{{ID: 1, UUID: "deadbeef"}}
+	in := buildInbound(nc, users, kernel.TLSCert{})
+	if in == nil {
+		t.Fatal("expected sudoku inbound")
+	}
+	if in["protocol"] != "sudoku" {
+		t.Fatalf("protocol: %v", in["protocol"])
+	}
+	settings := in["settings"].(M)
+	if settings["key"] != "aabbccdd" {
+		t.Fatalf("key: %v", settings["key"])
+	}
+	clients := settings["clients"].([]M)
+	if len(clients) != 1 || clients[0]["private_key"] != "deadbeef" {
+		t.Fatalf("clients: %#v", clients)
 	}
 }

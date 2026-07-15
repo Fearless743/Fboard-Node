@@ -138,6 +138,10 @@ func normalizeProto(p string) string {
 		return "anytls"
 	case "naive":
 		return "naive"
+		case "mieru":
+			return "mieru"
+		case "sudoku":
+			return "sudoku"
 	case "http":
 		return "http"
 	case "socks":
