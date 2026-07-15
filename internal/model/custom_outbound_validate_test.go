@@ -83,7 +83,7 @@ func TestValidateCustomOutbounds(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateCustomOutbounds(tc.outbounds)
+			err := ValidateCustomOutboundsWithTags(tc.outbounds, nil)
 			if tc.wantErr == "" && err != nil {
 				t.Fatalf("expected no error, got %v", err)
 			}

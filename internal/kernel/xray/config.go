@@ -657,7 +657,7 @@ func applyStreamSettings(base M, nc *model.NodeSpec, tc kernel.TLSCert) {
 			tlsSettings["certificates"] = []M{tlsCert}
 		} else {
 			// Fallback placeholder for auto-TLS environments.
-			// Xray allows empty certificates array in more cases than sing-box,
+			// Xray allows empty certificates array in more cases than other cores,
 			// but providing a placeholder helps documentation.
 		}
 		ss["security"] = "tls"

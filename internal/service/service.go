@@ -172,16 +172,10 @@ func (s *Service) Run(ctx context.Context) error {
 	pullTicker := time.NewTicker(pullInterval)
 	deviceReportTicker := time.NewTicker(time.Duration(s.cfg.Node.DeviceReportInterval) * time.Second)
 
-	// WS discovery: when in REST-only mode, periodically re-handshake to check
-	// if WS has been enabled. When WS is disconnected for too long, re-check
-	// if it's still available.
-	wsDiscoveryTicker := time.NewTicker(time.Duration(s.cfg.WS.DiscoveryInterval) * time.Second)
-
 	defer trackTicker.Stop()
 	defer reportTicker.Stop()
 	defer pullTicker.Stop()
 	defer deviceReportTicker.Stop()
-	defer wsDiscoveryTicker.Stop()
 
 	s.startWSClient(ctx)
 
@@ -211,9 +205,6 @@ func (s *Service) Run(ctx context.Context) error {
 
 		case result := <-s.pullResults:
 			s.applyPullResult(ctx, result)
-
-		case <-wsDiscoveryTicker.C:
-			s.wsDiscovery(ctx)
 
 		case status := <-s.wsStatusCh:
 			s.handleWSStatus(ctx, status)
@@ -455,63 +446,6 @@ func (s *Service) handleWSStatus(ctx context.Context, status controlplane.Status
 		// Clear global device state on disconnect
 		s.kernel.ClearGlobalDevices()
 		s.pullViaAPIAsync(ctx)
-	}
-}
-
-// wsDiscovery periodically checks WS availability:
-//
-//  1. REST-only mode (wsClient == nil): Re-handshake to check if panel now has
-//     WS enabled. If so, create and start a WS client. This handles the case
-//     where WS was not enabled at startup but enabled later.
-//
-//  2. WS disconnected for >10 min: Re-handshake to check if WS config changed.
-//     If WS is now disabled, stop the WS client and switch to REST-only.
-//     If WS config changed (different URL/channel), restart with new config.
-func (s *Service) wsDiscovery(ctx context.Context) {
-	if !s.source.SupportsDiscovery() {
-		return
-	}
-
-	needsCheck := false
-	if s.wsClient == nil {
-		needsCheck = true
-		nlog.Core().Debug("push discovery: no push client, checking if control plane enabled push")
-	} else if !s.wsDisconnectAt.IsZero() && time.Since(s.wsDisconnectAt) > 10*time.Minute {
-		needsCheck = true
-		nlog.Core().Debug("push discovery: push disconnected for >10min, re-checking")
-	}
-	if !needsCheck {
-		return
-	}
-
-	pushClient, err := s.source.Discover(ctx, s.wsMetrics, s.wsEvents, s.wsStatusCh)
-	if err != nil {
-		nlog.Core().Debug("push discovery failed", "error", err)
-		return
-	}
-	if s.source.SupportsPolling() {
-		s.pullViaAPIAsync(ctx)
-	}
-
-	if pushClient != nil {
-		if s.wsClient == nil {
-			nlog.Core().Info("push discovery: control plane enabled push, creating client")
-			s.metricsMu.Lock()
-			s.wsClient = pushClient
-			s.wsDisconnectAt = time.Time{}
-			s.metricsMu.Unlock()
-			s.startWSClient(ctx)
-		}
-	} else if s.wsClient != nil {
-		nlog.Core().Info("push discovery: control plane disabled push, switching to polling")
-		if s.wsCancel != nil {
-			s.wsCancel()
-		}
-		s.metricsMu.Lock()
-		s.wsClient = nil
-		s.wsDisconnectAt = time.Time{}
-		s.metricsMu.Unlock()
-		s.wsCancel = nil
 	}
 }
 
@@ -1048,7 +982,7 @@ func (s *Service) buildMetrics(status monitor.Status) map[string]interface{} {
 
 	// Active connections (last measured during tracker.Process()).
 	m["active_connections"] = s.tracker.ActiveConnections()
-	m["total_connections"] = s.tracker.TotalConnections()
+	m["total_connections"] = 0
 	m["active_users"] = len(online)
 	m["total_users"] = len(lastUsers)
 

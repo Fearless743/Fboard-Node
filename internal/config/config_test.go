@@ -460,12 +460,9 @@ func TestExpandMachineNode(t *testing.T) {
 		Cert:    CertConfig{},
 	}
 	cfg.setDefaultsFrom("/data")
-	node := cfg.ExpandMachineNode(42, "vless")
+	node := cfg.ExpandMachineNode(42)
 	if node.Panel.NodeID != 42 {
 		t.Errorf("NodeID: got %d", node.Panel.NodeID)
-	}
-	if node.Panel.NodeType != "vless" {
-		t.Errorf("NodeType: got %q", node.Panel.NodeType)
 	}
 	if node.Panel.Token != "mtok" {
 		t.Errorf("Token: got %q", node.Panel.Token)

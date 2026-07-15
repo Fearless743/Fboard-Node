@@ -374,12 +374,12 @@ func runBind(args []string) error {
 		if err != nil {
 			return err
 		}
-		return removeBinding(panel, 0, machineID, "")
+		return removeBinding(panel, machineID, "")
 	case "remove":
 		if len(rest) == 0 {
 			return errors.New("usage: fbctl bind remove <instance-id>")
 		}
-		return removeBinding("", 0, 0, rest[0])
+		return removeBinding("", 0, rest[0])
 	default:
 		return fmt.Errorf("unknown bind command: %s", sub)
 	}
@@ -716,37 +716,6 @@ func parseOutput(args []string) string {
 	return "text"
 }
 
-func parseRemoveNodeArgs(args []string) (string, int, error) {
-	var panel string
-	var nodeID int
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--panel", "-a", "--api":
-			if i+1 >= len(args) {
-				return "", 0, errors.New("missing value for --panel")
-			}
-			panel = args[i+1]
-			i++
-		case "--node-id", "-n":
-			if i+1 >= len(args) {
-				return "", 0, errors.New("missing value for --node-id")
-			}
-			var err error
-			nodeID, err = parsePositiveInt(args[i+1], "node-id")
-			if err != nil {
-				return "", 0, err
-			}
-			i++
-		default:
-			return "", 0, fmt.Errorf("unknown remove-node arg: %s", args[i])
-		}
-	}
-	if strings.TrimSpace(panel) == "" || nodeID <= 0 {
-		return "", 0, errors.New("usage: fbctl bind remove-node --panel URL --node-id ID")
-	}
-	return strings.TrimSpace(panel), nodeID, nil
-}
-
 func parseRemoveMachineArgs(args []string) (string, int, error) {
 	var panel string
 	var machineID int
@@ -787,7 +756,7 @@ func parsePositiveInt(raw string, field string) (int, error) {
 	return value, nil
 }
 
-func removeBinding(panelURL string, nodeID int, machineID int, instanceID string) error {
+func removeBinding(panelURL string, machineID int, instanceID string) error {
 	root, err := loadWritableRootConfig(defaultConfigPath)
 	if err != nil {
 		return err
@@ -807,9 +776,6 @@ func removeBinding(panelURL string, nodeID int, machineID int, instanceID string
 			matched = id == instanceID || inst.InstanceID == instanceID
 		} else {
 			matched = strings.TrimSpace(inst.Panel.URL) == strings.TrimSpace(panelURL)
-			if nodeID > 0 {
-				return errors.New("node mode has been removed; use --machine-id")
-			}
 			if machineID > 0 {
 				matched = matched && inst.IsMachineMode() && inst.Machine != nil && inst.Machine.MachineID == machineID
 			}
@@ -1063,7 +1029,7 @@ func collectRowsFromMeta() ([]instanceRow, error) {
 			ID:      inst.ID,
 			Mode:    inst.Mode,
 			Panel:   inst.PanelURL,
-			Target:  formatTarget(nil, inst.MachineID),
+			Target:  formatTarget(inst.MachineID),
 			Service: serviceStatus,
 			Health:  healthStatus,
 		})
@@ -1089,7 +1055,7 @@ func collectRowsFromConfig() ([]instanceRow, error) {
 			ID:      inst.InstanceID,
 			Mode:    "machine",
 			Panel:   inst.Panel.URL,
-			Target:  formatTarget(nil, machineIDPtr(inst)),
+			Target:  formatTarget(machineIDPtr(inst)),
 			Service: serviceStatus,
 			Health:  healthStatus,
 		})
@@ -1186,20 +1152,11 @@ func instanceAwareHealth() string {
 	return "down"
 }
 
-func formatTarget(nodeID *int, machineID *int) string {
-	_ = nodeID
+func formatTarget(machineID *int) string {
 	if machineID != nil && *machineID > 0 {
 		return fmt.Sprintf("machine_id=%d", *machineID)
 	}
 	return ""
-}
-
-func intPtr(v int) *int {
-	if v <= 0 {
-		return nil
-	}
-	vv := v
-	return &vv
 }
 
 func latestInstanceID(instances []*config.Config) string {
@@ -1208,58 +1165,6 @@ func latestInstanceID(instances []*config.Config) string {
 		return id
 	}
 	return ""
-}
-
-func regenerateServiceFile() error {
-	if initSystem() == "openrc" {
-		script := `#!/sbin/openrc-run
-
-description="Xboard Node Backend"
-command="/usr/local/bin/fboard-node"
-command_args="-c /etc/fboard-node/config.yml"
-command_background=true
-pidfile="/run/fboard-node.pid"
-output_log="/var/log/fboard-node.log"
-error_log="/var/log/fboard-node.log"
-
-depend() {
-    need net
-    after firewall
-}
-
-start_pre() {
-    if [ -f /etc/fboard-node/credentials.env ]; then
-        set -a
-        . /etc/fboard-node/credentials.env
-        set +a
-    fi
-    touch "$output_log"
-}
-`
-		return os.WriteFile(openrcInitScript, []byte(script), 0o755)
-	}
-	unit := fmt.Sprintf(`[Unit]
-Description=Xboard Node Backend
-Documentation=%s
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=%s
-EnvironmentFile=-%s
-ExecStart=%s -c %s
-Restart=always
-RestartSec=5
-LimitNOFILE=1048576
-NoNewPrivileges=true
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-`, strings.TrimSuffix(downloadBase, "/releases"), defaultInstallRoot, defaultCredentialsPath, defaultBinaryPath, defaultConfigPath)
-	return os.WriteFile(systemdServiceFilePath, []byte(unit), 0o644)
 }
 
 func machineIDPtr(cfg *config.Config) *int {

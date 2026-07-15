@@ -130,7 +130,7 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	o.mailboxes[mn.ID] = mb
 	o.eventsMu.Unlock()
 
-	nodeCfg := o.cfg.ExpandMachineNode(mn.ID, mn.Type)
+	nodeCfg := o.cfg.ExpandMachineNode(mn.ID)
 
 	perNodeClient := o.client.ForNode(mn.ID)
 	// Reset cached ETag so the subsequent GetConfig in Initial() gets a full response.

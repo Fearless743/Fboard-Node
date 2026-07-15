@@ -69,14 +69,13 @@ type RuntimeConfig struct {
 }
 
 // PanelConfig holds panel connection settings.
-// URL is required. Token / NodeID / NodeType / MachineID are filled at runtime by
+// URL is required. Token / NodeID / MachineID are filled at runtime by
 // ExpandMachineNode for per-node REST calls; they must not be set in YAML for panel auth.
 type PanelConfig struct {
 	URL       string `yaml:"url"`
 	Token     string `yaml:"-"` // runtime only (from machine.token)
 	TokenEnv  string `yaml:"-"` // unused; kept off YAML
 	NodeID    int    `yaml:"-"` // runtime only
-	NodeType  string `yaml:"-"` // runtime only
 	MachineID int    `yaml:"-"` // runtime only
 }
 
@@ -99,11 +98,10 @@ type NodeConfig struct {
 
 // WSConfig holds WebSocket client tuning options.
 type WSConfig struct {
-	StatusInterval    int `yaml:"status_interval"`    // node.status interval (sec), default 10
-	HandshakeTimeout  int `yaml:"handshake_timeout"`  // WS handshake timeout (sec), default 15
-	BackoffInitial    int `yaml:"backoff_initial"`    // initial reconnect delay (sec), default 1
-	BackoffMax        int `yaml:"backoff_max"`        // max reconnect delay (sec), default 60
-	DiscoveryInterval int `yaml:"discovery_interval"` // WS discovery interval (sec), default 300
+	StatusInterval   int `yaml:"status_interval"`   // node.status interval (sec), default 10
+	HandshakeTimeout int `yaml:"handshake_timeout"` // WS handshake timeout (sec), default 15
+	BackoffInitial   int `yaml:"backoff_initial"`   // initial reconnect delay (sec), default 1
+	BackoffMax       int `yaml:"backoff_max"`       // max reconnect delay (sec), default 60
 }
 
 type KernelConfig struct {
@@ -503,9 +501,6 @@ func (c *Config) inheritFrom(parent *Config) {
 	if c.WS.BackoffMax == 0 {
 		c.WS.BackoffMax = parent.WS.BackoffMax
 	}
-	if c.WS.DiscoveryInterval == 0 {
-		c.WS.DiscoveryInterval = parent.WS.DiscoveryInterval
-	}
 	// Runtime
 	if c.Runtime.GoGCPercent == 0 {
 		c.Runtime.GoGCPercent = parent.Runtime.GoGCPercent
@@ -608,9 +603,6 @@ func (c *Config) setDefaultsFrom(baseDir string) {
 	if c.WS.BackoffMax == 0 {
 		c.WS.BackoffMax = 60
 	}
-	if c.WS.DiscoveryInterval == 0 {
-		c.WS.DiscoveryInterval = 300
-	}
 	// Node defaults
 	if c.Node.TrackInterval == 0 {
 		c.Node.TrackInterval = 10
@@ -709,10 +701,9 @@ func (c *Config) validate() error {
 }
 
 // ExpandMachineNode builds a per-node runtime config for a machine-managed node.
-func (c *Config) ExpandMachineNode(nodeID int, nodeType string) *Config {
+func (c *Config) ExpandMachineNode(nodeID int) *Config {
 	nodeCfg := *c
 	nodeCfg.Panel.NodeID = nodeID
-	nodeCfg.Panel.NodeType = nodeType
 	nodeCfg.Panel.Token = c.Machine.Token
 	nodeCfg.Panel.MachineID = c.Machine.MachineID
 

@@ -80,7 +80,7 @@ func TestProcess_ZeroTraffic(t *testing.T) {
 	tr := New()
 	tr.Process(map[int][2]int64{}, nil, 0)
 
-	if tr.HasTraffic() {
+	if len(tr.FlushTraffic()) != 0 {
 		t.Error("expected no traffic for empty input")
 	}
 }
@@ -101,9 +101,6 @@ func TestFlushTraffic(t *testing.T) {
 	}
 
 	// After flush, should be empty
-	if tr.HasTraffic() {
-		t.Error("expected no traffic after flush")
-	}
 	flushed2 := tr.FlushTraffic()
 	if len(flushed2) != 0 {
 		t.Errorf("expected empty after second flush, got %v", flushed2)
@@ -116,10 +113,6 @@ func TestRestoreTraffic(t *testing.T) {
 
 	flushed := tr.FlushTraffic()
 	tr.RestoreTraffic(flushed)
-
-	if !tr.HasTraffic() {
-		t.Error("expected traffic after restore")
-	}
 
 	restored := tr.FlushTraffic()
 	if restored[1] != [2]int64{100, 200} {
@@ -184,23 +177,6 @@ func TestFlushAliveIPs_DedupSameIP(t *testing.T) {
 	}
 }
 
-func TestHasTraffic(t *testing.T) {
-	tr := New()
-	if tr.HasTraffic() {
-		t.Error("new tracker should not have traffic")
-	}
-
-	tr.Process(map[int][2]int64{1: {100, 200}}, nil, 1)
-	if !tr.HasTraffic() {
-		t.Error("should have traffic after process")
-	}
-
-	tr.FlushTraffic()
-	if tr.HasTraffic() {
-		t.Error("should not have traffic after flush")
-	}
-}
-
 func TestProcess_NoTrafficDelta(t *testing.T) {
 	tr := New()
 
@@ -209,7 +185,7 @@ func TestProcess_NoTrafficDelta(t *testing.T) {
 
 	// Same values — no delta
 	tr.Process(map[int][2]int64{1: {100, 200}}, nil, 1)
-	if tr.HasTraffic() {
+	if len(tr.FlushTraffic()) != 0 {
 		t.Error("expected no traffic for zero delta")
 	}
 }

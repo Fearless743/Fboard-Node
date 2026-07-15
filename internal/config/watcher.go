@@ -15,7 +15,6 @@ import (
 type Watcher struct {
 	path         string
 	debounce     time.Duration
-	onChange     func(*Config)
 	onChangeRoot func(*RootConfig)
 	watcher      *fsnotify.Watcher
 
@@ -24,41 +23,8 @@ type Watcher struct {
 	stopped  atomic.Bool
 }
 
-// WatchConfig watches path; invalid reloads are logged and ignored.
-// Stop via Stop() or cancel ctx.
-func WatchConfig(ctx context.Context, path string, onChange func(*Config)) (*Watcher, error) {
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return nil, err
-	}
-
-	fsw, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, err
-	}
-
-	// Watch parent dir so rename/atomic saves are visible.
-	dir := filepath.Dir(absPath)
-	if err := fsw.Add(dir); err != nil {
-		fsw.Close()
-		return nil, err
-	}
-
-	w := &Watcher{
-		path:     absPath,
-		debounce: 1 * time.Second,
-		onChange: onChange,
-		watcher:  fsw,
-		stopCh:   make(chan struct{}),
-	}
-
-	go w.loop(ctx)
-	nlog.Core().Info("config watcher started", "path", absPath)
-	return w, nil
-}
-
-
 // WatchConfigRoot watches path and reloads the root config model.
+// Stop via Stop() or cancel ctx.
 func WatchConfigRoot(ctx context.Context, path string, onChange func(*RootConfig)) (*Watcher, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -70,6 +36,7 @@ func WatchConfigRoot(ctx context.Context, path string, onChange func(*RootConfig
 		return nil, err
 	}
 
+	// Watch parent dir so rename/atomic saves are visible.
 	dir := filepath.Dir(absPath)
 	if err := fsw.Add(dir); err != nil {
 		fsw.Close()
@@ -135,23 +102,13 @@ func (w *Watcher) reload() {
 	if w.stopped.Load() {
 		return
 	}
-	if w.onChangeRoot != nil {
-		root, err := LoadRoot(w.path)
-		if err != nil {
-			nlog.Core().Error("config reload failed, keeping current config", "error", err)
-			return
-		}
-		nlog.Core().Info("config reloaded successfully")
-		w.onChangeRoot(root)
-		return
-	}
-	cfg, err := Load(w.path)
+	root, err := LoadRoot(w.path)
 	if err != nil {
 		nlog.Core().Error("config reload failed, keeping current config", "error", err)
 		return
 	}
 	nlog.Core().Info("config reloaded successfully")
-	w.onChange(cfg)
+	w.onChangeRoot(root)
 }
 
 func (w *Watcher) Stop() {

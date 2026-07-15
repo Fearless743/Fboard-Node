@@ -314,13 +314,3 @@ func sudokuConfigToPanel(sc *SudokuConfig) *panel.SudokuConfig {
 	}
 }
 
-func UserSpecsToPanel(users []UserSpec) []panel.User {
-	if users == nil {
-		return nil
-	}
-	out := make([]panel.User, 0, len(users))
-	for _, user := range users {
-		out = append(out, panel.User{ID: user.ID, UUID: user.UUID, SpeedLimit: user.SpeedLimit, DeviceLimit: user.DeviceLimit})
-	}
-	return out
-}
