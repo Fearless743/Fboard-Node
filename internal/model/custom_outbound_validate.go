@@ -6,10 +6,6 @@ import (
 	"strings"
 )
 
-func ValidateCustomOutbounds(outbounds []OutboundConfig) error {
-	return ValidateCustomOutboundsWithTags(outbounds, nil)
-}
-
 func ValidateCustomOutboundsWithTags(outbounds []OutboundConfig, additionalTags []string) error {
 	if len(outbounds) == 0 {
 		return nil

@@ -835,6 +835,6 @@ func (x *Xray) updateDispatcherLimits(users []model.UserSpec) {
 }
 
 // xrayCreationMu serialises xrayCore.New() + globalLimitDispatcher capture
-// so that concurrent Xray instances in multi-node mode each capture their
+// so that concurrent Xray instances under machine mode each capture their
 // own LimitDispatcher.
 var xrayCreationMu sync.Mutex

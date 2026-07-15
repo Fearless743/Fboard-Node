@@ -70,10 +70,8 @@ type PushClient interface {
 type Source interface {
 	Initial(ctx context.Context, metricsFn func() map[string]interface{}, events chan<- Event, statuses chan<- StatusChange) (Bootstrap, error)
 	Poll(ctx context.Context) (Snapshot, error)
-	Discover(ctx context.Context, metricsFn func() map[string]interface{}, events chan<- Event, statuses chan<- StatusChange) (PushClient, error)
 	Metrics() APIMetrics
 	SupportsPolling() bool
-	SupportsDiscovery() bool
 }
 
 type Sink interface {

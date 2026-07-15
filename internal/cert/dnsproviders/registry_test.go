@@ -66,10 +66,13 @@ func TestProvidersValidateMissingEnv(t *testing.T) {
 		"azure":          true, // partially excluded — actually still requires sub+rg
 		"googleclouddns": true, // requires GCE_PROJECT
 	}
-	for _, p := range List() {
-		canonical := p.Names[0]
+	for _, canonical := range CanonicalNames() {
 		if excluded[canonical] {
 			continue
+		}
+		p, ok := Get(canonical)
+		if !ok {
+			t.Fatalf("lookup %q: not found", canonical)
 		}
 		t.Run(canonical, func(t *testing.T) {
 			_, err := p.Build(map[string]string{})

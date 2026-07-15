@@ -81,13 +81,3 @@ func CanonicalNames() []string {
 	return names
 }
 
-// List returns all registered providers (canonical entries only), sorted by
-// canonical name.
-func List() []*Provider {
-	mu.RLock()
-	defer mu.RUnlock()
-	out := make([]*Provider, len(ordered))
-	copy(out, ordered)
-	sort.Slice(out, func(i, j int) bool { return out[i].Names[0] < out[j].Names[0] })
-	return out
-}

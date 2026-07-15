@@ -6,8 +6,6 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
-
-	"github.com/fearless743/fboard-node/internal/nlog"
 )
 
 // snapshot is an immutable point-in-time view of tracker state.
@@ -31,7 +29,7 @@ type snapshot struct {
 //
 // Thread safety: Process() acquires mu to update internal state, then
 // atomically publishes a new snapshot. All read methods (Flush*,
-// CurrentOnline, LogStats, *Speed) read the snapshot lock-free.
+// CurrentOnline, *Speed) read the snapshot lock-free.
 // This eliminates contention between the 10s Process tick and the 60s
 // flush/push tick.
 type Tracker struct {
@@ -180,13 +178,6 @@ func (t *Tracker) RestoreTraffic(data map[int][2]int64) {
 	t.mu.Unlock()
 }
 
-// HasTraffic returns true if there is accumulated traffic to report.
-func (t *Tracker) HasTraffic() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return len(t.pendingTraffic) > 0
-}
-
 // FlushAliveIPs returns per-user alive IPs.
 // Reuses internal buffer. Returns nil if unchanged.
 func (t *Tracker) FlushAliveIPs() map[int][]string {
@@ -303,24 +294,12 @@ func (t *Tracker) RestoreAliveIPs(data map[int][]string) {
 	}
 }
 
-// LogStats logs current tracking statistics.
-// Lock-free: reads from live snapshot.
-func (t *Tracker) LogStats() {
-	s := t.live.Load()
-	nlog.TrackerStats(s.connCount, len(s.online))
-}
-
 // ActiveConnections returns the last observed active connection count.
 // Lock-free: reads from live snapshot.
 func (t *Tracker) ActiveConnections() int {
 	return t.live.Load().connCount
 }
 
-// TotalConnections is deprecated — no longer tracked per-connection.
-// Returns 0 for backward compatibility.
-func (t *Tracker) TotalConnections() int64 {
-	return 0
-}
 
 // InboundSpeed returns the last observed inbound (download) speed in bytes/second.
 // Lock-free: reads from live snapshot.

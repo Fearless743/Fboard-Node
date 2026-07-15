@@ -41,7 +41,6 @@ func NewMachinePanelControlPlane(
 }
 
 func (p *MachinePanelControlPlane) SupportsPolling() bool       { return true }
-func (p *MachinePanelControlPlane) SupportsDiscovery() bool     { return false }
 func (p *MachinePanelControlPlane) SupportsReporting() bool     { return true }
 func (p *MachinePanelControlPlane) SupportsDeviceReports() bool { return p.push != nil }
 
@@ -114,15 +113,6 @@ func (p *MachinePanelControlPlane) Poll(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("machine poll normalize: %w", err)
 	}
 	return Snapshot{Config: nodeSpec, Users: model.UserSpecsFromPanel(users)}, nil
-}
-
-func (p *MachinePanelControlPlane) Discover(
-	ctx context.Context,
-	metricsFn func() map[string]interface{},
-	events chan<- Event,
-	statuses chan<- StatusChange,
-) (PushClient, error) {
-	return nil, nil
 }
 
 func (p *MachinePanelControlPlane) Report(payload ReportPayload) error {
