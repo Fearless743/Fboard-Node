@@ -155,6 +155,7 @@ func sudokuConfigFromPanel(sc *panel.SudokuConfig) *SudokuConfig {
 		HTTPMaskMode:       sc.HTTPMaskMode,
 		PathRoot:           sc.PathRoot,
 		Fallback:           sc.Fallback,
+		Multiplex:          sc.Multiplex,
 	}
 }
 
@@ -311,6 +312,7 @@ func sudokuConfigToPanel(sc *SudokuConfig) *panel.SudokuConfig {
 		HTTPMaskMode:       sc.HTTPMaskMode,
 		PathRoot:           sc.PathRoot,
 		Fallback:           sc.Fallback,
+		Multiplex:          sc.Multiplex,
 	}
 }
 

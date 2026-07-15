@@ -29,6 +29,7 @@ import (
 	anytlsproxy "github.com/xtls/xray-core/proxy/anytls"
 	naiveAccount "github.com/xtls/xray-core/proxy/naive/account"
 	mieruAccount "github.com/xtls/xray-core/proxy/mieru/account"
+	sudokuproxy "github.com/xtls/xray-core/proxy/sudoku"
 	"golang.org/x/time/rate"
 
 
@@ -103,7 +104,7 @@ func (x *Xray) Protocols() []string {
 	return []string{
 		"vmess", "vless", "trojan", "shadowsocks",
 		"hysteria", "socks", "http",
-		"tuic", "anytls", "naive", "mieru",
+		"tuic", "anytls", "naive", "mieru", "sudoku",
 	}
 }
 
@@ -604,6 +605,14 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
 
 	case "mieru":
 		mu.Account = &mieruAccount.MemoryAccount{Name: u.UUID, Password: u.UUID}
+
+	case "sudoku":
+		// UUID field carries Available Private Key hex for sudoku nodes.
+		hash, err := sudokuproxy.UserHashFromPrivateKeyHex(u.UUID)
+		if err != nil {
+			return nil, fmt.Errorf("sudoku user hash: %w", err)
+		}
+		mu.Account = &sudokuproxy.MemoryAccount{PrivateKey: u.UUID, UserHash: hash}
 
 	default:
 		return nil, fmt.Errorf("protocol %q does not support MemoryUser", proto)

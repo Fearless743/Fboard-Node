@@ -83,8 +83,30 @@ func NodeSpecFromStandalone(cfg *config.Config) *NodeSpec {
 		PaddingScheme:       sc.Node.PaddingScheme,
 		Transport:           sc.Node.Transport,
 		TrafficPattern:      sc.Node.TrafficPattern,
+		SudokuConfig:        sudokuConfigFromStandalone(sc.Node.SudokuConfig),
 		Multiplex:           multiplex,
 		AcceptProxyProtocol: sc.Node.AcceptProxyProtocol,
+	}
+}
+
+func sudokuConfigFromStandalone(sc *config.StandaloneSudokuConfig) *SudokuConfig {
+	if sc == nil {
+		return nil
+	}
+	return &SudokuConfig{
+		AEADMethod:         sc.AEADMethod,
+		PaddingMin:         sc.PaddingMin,
+		PaddingMax:         sc.PaddingMax,
+		TableType:          sc.TableType,
+		HandshakeTimeout:   sc.HandshakeTimeout,
+		EnablePureDownlink: sc.EnablePureDownlink,
+		CustomTable:        sc.CustomTable,
+		CustomTables:       cloneStringSlice(sc.CustomTables),
+		DisableHTTPMask:    sc.DisableHTTPMask,
+		HTTPMaskMode:       sc.HTTPMaskMode,
+		PathRoot:           sc.PathRoot,
+		Fallback:           sc.Fallback,
+		Multiplex:          sc.Multiplex,
 	}
 }
 

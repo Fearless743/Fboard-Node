@@ -99,6 +99,7 @@ type SudokuConfig struct {
 	HTTPMaskMode       string
 	PathRoot           string
 	Fallback           string
+	Multiplex          string // off|auto|on
 }
 
 type UserSpec struct {

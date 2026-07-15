@@ -91,7 +91,7 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	} else {
 		nlog.Core().Warn("xray: unsupported protocol, no inbound configured",
 			"protocol", nc.Protocol,
-			"supported", "vmess, vless, trojan, shadowsocks, hysteria, socks, http, tuic, anytls, naive, mieru")
+			"supported", "vmess, vless, trojan, shadowsocks, hysteria, socks, http, tuic, anytls, naive, mieru, sudoku")
 	}
 
 	// Merge panel routes and static config routes
@@ -254,6 +254,8 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 		return buildNaive(base, nc, users, tc)
 	case "mieru":
 		return buildMieru(base, nc, users)
+	case "sudoku":
+		return buildSudoku(base, nc, users)
 	default:
 		return nil
 	}
@@ -1109,5 +1111,66 @@ func buildMieru(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 			"trafficPattern": nc.TrafficPattern,
 		},
 	}
+	return base
+}
+
+func buildSudoku(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+	// Server key = Master Public Key (from panel server_key).
+	// Client private key is carried in UserSpec.UUID (panel writes available private key there for sudoku).
+	clients := make([]M, 0, len(users))
+	for _, u := range users {
+		clients = append(clients, M{
+			"private_key": u.UUID,
+			"password":    u.UUID,
+			"email":       userEmail(u.ID),
+		})
+	}
+	settings := M{
+		"clients": clients,
+		"key":     nc.ServerKey,
+	}
+	sc := nc.SudokuConfig
+	if sc != nil {
+		if sc.AEADMethod != "" {
+			settings["aead_method"] = sc.AEADMethod
+		}
+		if sc.PaddingMin != nil {
+			settings["padding_min"] = *sc.PaddingMin
+		}
+		if sc.PaddingMax != nil {
+			settings["padding_max"] = *sc.PaddingMax
+		}
+		if sc.TableType != "" {
+			settings["table_type"] = sc.TableType
+		}
+		if sc.EnablePureDownlink != nil {
+			settings["enable_pure_downlink"] = *sc.EnablePureDownlink
+		}
+		if sc.CustomTable != "" {
+			settings["custom_table"] = sc.CustomTable
+		}
+		if len(sc.CustomTables) > 0 {
+			settings["custom_tables"] = sc.CustomTables
+		}
+		if sc.HandshakeTimeout != nil {
+			settings["handshake_timeout"] = *sc.HandshakeTimeout
+		}
+		settings["disable_http_mask"] = sc.DisableHTTPMask
+		if sc.HTTPMaskMode != "" {
+			settings["http_mask_mode"] = sc.HTTPMaskMode
+		}
+		if sc.PathRoot != "" {
+			settings["path_root"] = sc.PathRoot
+		}
+		if sc.Fallback != "" {
+			settings["fallback"] = sc.Fallback
+		}
+		if sc.Multiplex != "" {
+			settings["multiplex"] = sc.Multiplex
+		}
+	}
+	base["settings"] = settings
+	// Sudoku owns its own HTTPMask; use plain TCP stream under Xray.
+	base["streamSettings"] = M{"network": "tcp"}
 	return base
 }

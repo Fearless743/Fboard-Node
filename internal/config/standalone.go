@@ -47,8 +47,28 @@ type StandaloneNodeConfig struct {
 	Transport         string `yaml:"transport,omitempty"`
 	TrafficPattern    string `yaml:"traffic_pattern,omitempty"`
 
+	// Sudoku
+	SudokuConfig *StandaloneSudokuConfig `yaml:"sudoku_config,omitempty"`
+
 	Multiplex           *StandaloneMultiplexConfig `yaml:"multiplex,omitempty"`
 	AcceptProxyProtocol bool                       `yaml:"accept_proxy_protocol,omitempty"`
+}
+
+// StandaloneSudokuConfig mirrors panel.SudokuConfig for local testing.
+type StandaloneSudokuConfig struct {
+	AEADMethod         string   `yaml:"aead_method,omitempty"`
+	PaddingMin         *int     `yaml:"padding_min,omitempty"`
+	PaddingMax         *int     `yaml:"padding_max,omitempty"`
+	TableType          string   `yaml:"table_type,omitempty"`
+	HandshakeTimeout   *int     `yaml:"handshake_timeout,omitempty"`
+	EnablePureDownlink *bool    `yaml:"enable_pure_downlink,omitempty"`
+	CustomTable        string   `yaml:"custom_table,omitempty"`
+	CustomTables       []string `yaml:"custom_tables,omitempty"`
+	DisableHTTPMask    bool     `yaml:"disable_http_mask,omitempty"`
+	HTTPMaskMode       string   `yaml:"http_mask_mode,omitempty"`
+	PathRoot           string   `yaml:"path_root,omitempty"`
+	Fallback           string   `yaml:"fallback,omitempty"`
+	Multiplex          string   `yaml:"multiplex,omitempty"`
 }
 
 type StandaloneRouteRule struct {

@@ -199,6 +199,7 @@ type SudokuConfig struct {
 	HTTPMaskMode       string   `json:"http_mask_mode,omitempty"`
 	PathRoot           string   `json:"path_root,omitempty"`
 	Fallback           string   `json:"fallback,omitempty"`
+	Multiplex          string   `json:"multiplex,omitempty"` // off|auto|on
 }
 
 // CertConfig holds certificate automation settings from the panel.
