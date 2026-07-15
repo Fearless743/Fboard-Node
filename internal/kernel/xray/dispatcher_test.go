@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/model"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/transport"
 )

@@ -1,6 +1,6 @@
 package model
 
-import "github.com/cedar2025/xboard-node/internal/config"
+import "github.com/fearless743/fboard-node/internal/config"
 
 type NodeSpec struct {
 	Protocol        string

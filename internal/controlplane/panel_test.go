@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cedar2025/xboard-node/internal/config"
-	panelapi "github.com/cedar2025/xboard-node/internal/panel"
+	"github.com/fearless743/fboard-node/internal/config"
+	panelapi "github.com/fearless743/fboard-node/internal/panel"
 )
 
 func TestPanelControlPlaneInitialRejectsInvalidCustomOutbounds(t *testing.T) {
@@ -75,21 +75,3 @@ func newPanelTestServer(configBody string) *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
-func TestTranslateWSEventRejectsUnsupportedProtocolForKernel(t *testing.T) {
-	_, err := TranslateWSEvent(panelapi.WSEvent{
-		Type: panelapi.WSEventSyncConfig,
-		Config: &panelapi.NodeConfig{
-			Protocol:   "shadowsocks",
-			ServerPort: 8388,
-			CustomOutbounds: []panelapi.OutboundConfig{
-				{Tag: "hy2", Protocol: "hysteria2", Settings: map[string]any{"server": "2.2.2.2", "server_port": 8443}},
-			},
-		},
-	}, config.KernelConfig{})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), `translate node config: validate custom outbounds: custom_outbounds[0].protocol "hysteria2" is not supported by kernel "xray"`) {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}

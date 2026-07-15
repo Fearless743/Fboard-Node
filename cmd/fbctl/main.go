@@ -17,24 +17,24 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	defaultConfigPath      = "/etc/xboard-node/config.yml"
-	defaultMetaPath        = "/etc/xboard-node/install-meta.json"
-	defaultCredentialsPath = "/etc/xboard-node/credentials.env"
-	defaultBinaryPath      = "/usr/local/bin/xboard-node"
-	defaultCLIPath         = "/usr/local/bin/xbctl"
-	serviceName            = "xboard-node"
-	systemdServiceFilePath = "/etc/systemd/system/xboard-node.service"
-	openrcInitScript       = "/etc/init.d/xboard-node"
-	defaultInstallRoot = "/etc/xboard-node"
+	defaultConfigPath      = "/etc/fboard-node/config.yml"
+	defaultMetaPath        = "/etc/fboard-node/install-meta.json"
+	defaultCredentialsPath = "/etc/fboard-node/credentials.env"
+	defaultBinaryPath      = "/usr/local/bin/fboard-node"
+	defaultCLIPath         = "/usr/local/bin/fbctl"
+	serviceName            = "fboard-node"
+	systemdServiceFilePath = "/etc/systemd/system/fboard-node.service"
+	openrcInitScript       = "/etc/init.d/fboard-node"
+	defaultInstallRoot = "/etc/fboard-node"
 )
 
 // Set via ldflags at build time: -X main.downloadBase=...
-var downloadBase = "https://github.com/cedar2025/xboard-node/releases"
+var downloadBase = "https://github.com/Fearless743/Fboard-Node/releases"
 
 // initSystem returns "systemd", "openrc", or "unknown".
 func initSystem() string {
@@ -209,7 +209,7 @@ func run(args []string) error {
 	case "uninstall":
 		return runUninstall(args[1:])
 	case "version", "-v", "--version":
-		fmt.Printf("xbctl %s (built %s)\n", version, buildTime)
+		fmt.Printf("fbctl %s (built %s)\n", version, buildTime)
 		return nil
 	case "config":
 		return runConfig(args[1:])
@@ -222,36 +222,36 @@ func run(args []string) error {
 }
 
 func printUsage() {
-	fmt.Println(`xbctl commands:
-  xbctl help
-  xbctl status
-  xbctl list [--output text|json]
-  xbctl instance list [--output text|json]
-  xbctl instance get <id> [--output text|json]
-  xbctl config init --mode node|machine --panel-url URL --token TOKEN [flags]
-  xbctl config health-port [--config PATH]
-  xbctl service status|start|stop|restart|enable|disable|logs
-  xbctl health
-  xbctl bind add-node --panel-url URL --token TOKEN --node-id ID [--node-type TYPE]
-  xbctl bind add-machine --panel-url URL --token TOKEN --machine-id ID
-  xbctl bind remove <instance-id>
-  xbctl bind remove-node --panel URL --node-id ID
-  xbctl bind remove-machine --panel URL --machine-id ID
-  xbctl upgrade [--version VERSION]
-  xbctl uninstall [--purge] [--yes]
-  xbctl version
+	fmt.Println(`fbctl commands:
+  fbctl help
+  fbctl status
+  fbctl list [--output text|json]
+  fbctl instance list [--output text|json]
+  fbctl instance get <id> [--output text|json]
+  fbctl config init --mode node|machine --panel-url URL --token TOKEN [flags]
+  fbctl config health-port [--config PATH]
+  fbctl service status|start|stop|restart|enable|disable|logs
+  fbctl health
+  fbctl bind add-node --panel-url URL --token TOKEN --node-id ID [--node-type TYPE]
+  fbctl bind add-machine --panel-url URL --token TOKEN --machine-id ID
+  fbctl bind remove <instance-id>
+  fbctl bind remove-node --panel URL --node-id ID
+  fbctl bind remove-machine --panel URL --machine-id ID
+  fbctl upgrade [--version VERSION]
+  fbctl uninstall [--purge] [--yes]
+  fbctl version
 
 shortcuts:
-  xbctl start|stop|restart        = xbctl service start|stop|restart
-  xbctl log|logs                  = xbctl service logs
-  xbctl bind-node ...             = xbctl bind add-node ...
-  xbctl bind-machine ...          = xbctl bind add-machine ...
-  xbctl unbind-node ...           = xbctl bind remove-node ...
-  xbctl unbind-machine ...        = xbctl bind remove-machine ...`)
+  fbctl start|stop|restart        = fbctl service start|stop|restart
+  fbctl log|logs                  = fbctl service logs
+  fbctl bind-node ...             = fbctl bind add-node ...
+  fbctl bind-machine ...          = fbctl bind add-machine ...
+  fbctl unbind-node ...           = fbctl bind remove-node ...
+  fbctl unbind-machine ...        = fbctl bind remove-machine ...`)
 }
 
 func runStatus() error {
-	fmt.Println("xboard-node status")
+	fmt.Println("fboard-node status")
 	fmt.Println()
 
 	// Version from install-meta.json
@@ -299,7 +299,7 @@ func runInstance(args []string) error {
 		return fmt.Errorf("unknown instance command: %s", args[0])
 	}
 	if len(args) < 2 {
-		return errors.New("usage: xbctl instance get <id> [--output text|json]")
+		return errors.New("usage: fbctl instance get <id> [--output text|json]")
 	}
 	id := args[1]
 	output := parseOutput(args[2:])
@@ -317,7 +317,7 @@ func runInstance(args []string) error {
 
 func runService(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: xbctl service <status|start|stop|restart|enable|disable|logs>")
+		return errors.New("usage: fbctl service <status|start|stop|restart|enable|disable|logs>")
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -345,7 +345,7 @@ func runService(args []string) error {
 		return runCommand("sudo", "systemctl", "disable", serviceName)
 	case "logs":
 		if init == "openrc" {
-			logFile := "/var/log/xboard-node.log"
+			logFile := "/var/log/fboard-node.log"
 			if len(rest) == 0 {
 				return runCommand("tail", "-f", logFile)
 			}
@@ -371,7 +371,7 @@ func runHealth() error {
 
 func runBind(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: xbctl bind <add-node|add-machine|remove-node|remove-machine> ...")
+		return errors.New("usage: fbctl bind <add-node|add-machine|remove-node|remove-machine> ...")
 	}
 	if err := ensureRoot("bind"); err != nil {
 		return err
@@ -397,7 +397,7 @@ func runBind(args []string) error {
 		return removeBinding(panel, 0, machineID, "")
 	case "remove":
 		if len(rest) == 0 {
-			return errors.New("usage: xbctl bind remove <instance-id>")
+			return errors.New("usage: fbctl bind remove <instance-id>")
 		}
 		return removeBinding("", 0, 0, rest[0])
 	default:
@@ -459,11 +459,11 @@ func runUpgrade(args []string) error {
 
 	binaryDir := filepath.Dir(defaultBinaryPath)
 	cliDir := filepath.Dir(defaultCLIPath)
-	newBinary := filepath.Join(binaryDir, ".xboard-node.new")
-	newCLI := filepath.Join(cliDir, ".xbctl.new")
+	newBinary := filepath.Join(binaryDir, ".fboard-node.new")
+	newCLI := filepath.Join(cliDir, ".fbctl.new")
 
-	binaryURL := resolveDownloadURL(fmt.Sprintf("xboard-node-linux-%s", arch), version)
-	cliURL := resolveDownloadURL(fmt.Sprintf("xbctl-linux-%s", arch), version)
+	binaryURL := resolveDownloadURL(fmt.Sprintf("fboard-node-linux-%s", arch), version)
+	cliURL := resolveDownloadURL(fmt.Sprintf("fbctl-linux-%s", arch), version)
 
 	fmt.Printf("Downloading %s...\n", binaryURL)
 	if err := downloadFile(binaryURL, newBinary); err != nil {
@@ -473,14 +473,14 @@ func runUpgrade(args []string) error {
 	fmt.Printf("Downloading %s...\n", cliURL)
 	if err := downloadFile(cliURL, newCLI); err != nil {
 		os.Remove(newBinary)
-		return fmt.Errorf("download xbctl: %w", err)
+		return fmt.Errorf("download fbctl: %w", err)
 	}
 
 	if err := os.Chmod(newBinary, 0o755); err != nil {
 		return cleanupFiles(newBinary, newCLI, fmt.Errorf("chmod binary: %w", err))
 	}
 	if err := os.Chmod(newCLI, 0o755); err != nil {
-		return cleanupFiles(newBinary, newCLI, fmt.Errorf("chmod xbctl: %w", err))
+		return cleanupFiles(newBinary, newCLI, fmt.Errorf("chmod fbctl: %w", err))
 	}
 
 	// Validate downloaded binaries
@@ -488,7 +488,7 @@ func runUpgrade(args []string) error {
 		return cleanupFiles(newBinary, newCLI, fmt.Errorf("binary version check failed: %s", string(out)))
 	}
 	if out, err := exec.Command(newCLI, "version").CombinedOutput(); err != nil {
-		return cleanupFiles(newBinary, newCLI, fmt.Errorf("xbctl version check failed: %s", string(out)))
+		return cleanupFiles(newBinary, newCLI, fmt.Errorf("fbctl version check failed: %s", string(out)))
 	}
 
 	// Backup existing binaries
@@ -502,7 +502,7 @@ func runUpgrade(args []string) error {
 	}
 	if fileExists(defaultCLIPath) {
 		if err := copyFile(defaultCLIPath, backupCLI); err != nil {
-			return cleanupFiles(newBinary, newCLI, fmt.Errorf("backup xbctl: %w", err))
+			return cleanupFiles(newBinary, newCLI, fmt.Errorf("backup fbctl: %w", err))
 		}
 	}
 
@@ -515,12 +515,12 @@ func runUpgrade(args []string) error {
 			os.Rename(backupBinary, defaultBinaryPath)
 		}
 		os.Remove(newCLI)
-		return fmt.Errorf("replace xbctl: %w", err)
+		return fmt.Errorf("replace fbctl: %w", err)
 	}
 
-	// Recreate /usr/bin/xbctl symlink
-	os.Remove("/usr/bin/xbctl")
-	os.Symlink(defaultCLIPath, "/usr/bin/xbctl")
+	// Recreate /usr/bin/fbctl symlink
+	os.Remove("/usr/bin/fbctl")
+	os.Symlink(defaultCLIPath, "/usr/bin/fbctl")
 
 	// Restart service
 	fmt.Println("Restarting service...")
@@ -545,7 +545,7 @@ func runUpgrade(args []string) error {
 		}
 		if fileExists(backupCLI) {
 			if e := os.Rename(backupCLI, defaultCLIPath); e != nil {
-				fmt.Printf("Warning: rollback xbctl failed: %v\n", e)
+				fmt.Printf("Warning: rollback fbctl failed: %v\n", e)
 				rollbackOK = false
 			}
 		}
@@ -635,7 +635,7 @@ func runUninstall(args []string) error {
 
 	// Remove binaries
 	// Remove binaries and symlinks
-	for _, p := range []string{defaultBinaryPath, defaultCLIPath, "/usr/bin/xbctl"} {
+	for _, p := range []string{defaultBinaryPath, defaultCLIPath, "/usr/bin/fbctl"} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			warnings = append(warnings, fmt.Sprintf("remove %s: %v", p, err))
 		}
@@ -762,7 +762,7 @@ func parseRemoveNodeArgs(args []string) (string, int, error) {
 		}
 	}
 	if strings.TrimSpace(panel) == "" || nodeID <= 0 {
-		return "", 0, errors.New("usage: xbctl bind remove-node --panel URL --node-id ID")
+		return "", 0, errors.New("usage: fbctl bind remove-node --panel URL --node-id ID")
 	}
 	return strings.TrimSpace(panel), nodeID, nil
 }
@@ -793,7 +793,7 @@ func parseRemoveMachineArgs(args []string) (string, int, error) {
 		}
 	}
 	if strings.TrimSpace(panel) == "" || machineID <= 0 {
-		return "", 0, errors.New("usage: xbctl bind remove-machine --panel URL --machine-id ID")
+		return "", 0, errors.New("usage: fbctl bind remove-machine --panel URL --machine-id ID")
 	}
 	return strings.TrimSpace(panel), machineID, nil
 }
@@ -868,7 +868,7 @@ func removeBinding(panelURL string, nodeID int, machineID int, instanceID string
 		}
 		fmt.Printf("removed %d binding(s)\n", len(removed))
 		fmt.Println("All bindings removed. Service stopped.")
-		fmt.Println("Use 'xbctl bind add-node/add-machine' to add a new binding, or 'xbctl uninstall' to fully uninstall.")
+		fmt.Println("Use 'fbctl bind add-node/add-machine' to add a new binding, or 'fbctl uninstall' to fully uninstall.")
 		return nil
 	}
 
@@ -1258,12 +1258,12 @@ func regenerateServiceFile() error {
 		script := `#!/sbin/openrc-run
 
 description="Xboard Node Backend"
-command="/usr/local/bin/xboard-node"
-command_args="-c /etc/xboard-node/config.yml"
+command="/usr/local/bin/fboard-node"
+command_args="-c /etc/fboard-node/config.yml"
 command_background=true
-pidfile="/run/xboard-node.pid"
-output_log="/var/log/xboard-node.log"
-error_log="/var/log/xboard-node.log"
+pidfile="/run/fboard-node.pid"
+output_log="/var/log/fboard-node.log"
+error_log="/var/log/fboard-node.log"
 
 depend() {
     need net
@@ -1271,9 +1271,9 @@ depend() {
 }
 
 start_pre() {
-    if [ -f /etc/xboard-node/credentials.env ]; then
+    if [ -f /etc/fboard-node/credentials.env ]; then
         set -a
-        . /etc/xboard-node/credentials.env
+        . /etc/fboard-node/credentials.env
         set +a
     fi
     touch "$output_log"
@@ -1317,7 +1317,7 @@ func machineIDPtr(cfg *config.Config) *int {
 
 func runConfig(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: xbctl config <init|health-port>")
+		return errors.New("usage: fbctl config <init|health-port>")
 	}
 	switch args[0] {
 	case "init":
@@ -1469,7 +1469,7 @@ func runConfigInit(args []string) error {
 	inst.InstanceID = instanceID
 
 	if installRoot == "" {
-		installRoot = "/etc/xboard-node"
+		installRoot = "/etc/fboard-node"
 	}
 	inst.Kernel.ConfigDir = filepath.Join(installRoot, "instances", instanceID)
 

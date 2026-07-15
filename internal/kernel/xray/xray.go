@@ -25,15 +25,20 @@ import (
 	"github.com/xtls/xray-core/proxy/trojan"
 	"github.com/xtls/xray-core/proxy/vless"
 	"github.com/xtls/xray-core/proxy/vmess"
+	tuicAccount "github.com/xtls/xray-core/proxy/tuic/account"
+	anytlsproxy "github.com/xtls/xray-core/proxy/anytls"
+	naiveAccount "github.com/xtls/xray-core/proxy/naive/account"
+	mieruAccount "github.com/xtls/xray-core/proxy/mieru/account"
 	"golang.org/x/time/rate"
+
 
 	_ "github.com/xtls/xray-core/main/distro/all"
 
-	"github.com/cedar2025/xboard-node/internal/config"
-	"github.com/cedar2025/xboard-node/internal/kernel"
-	"github.com/cedar2025/xboard-node/internal/kernel/geodata"
-	"github.com/cedar2025/xboard-node/internal/nlog"
-	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/kernel"
+	"github.com/fearless743/fboard-node/internal/kernel/geodata"
+	"github.com/fearless743/fboard-node/internal/nlog"
+	"github.com/fearless743/fboard-node/internal/model"
 )
 
 const (
@@ -97,7 +102,8 @@ func (x *Xray) Capabilities() kernel.Capabilities {
 func (x *Xray) Protocols() []string {
 	return []string{
 		"vmess", "vless", "trojan", "shadowsocks",
-		"hysteria",
+		"hysteria", "socks", "http",
+		"tuic", "anytls", "naive", "mieru",
 	}
 }
 
@@ -582,6 +588,22 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
 			}
 			mu.Account = cipherObj
 		}
+
+	case "tuic":
+		id, err := uuid.ParseString(u.UUID)
+		if err != nil {
+			return nil, fmt.Errorf("parse tuic UUID: %w", err)
+		}
+		mu.Account = &tuicAccount.MemoryAccount{UUID: id, Password: u.UUID}
+
+	case "anytls":
+		mu.Account = &anytlsproxy.MemoryAccount{Password: u.UUID}
+
+	case "naive":
+		mu.Account = &naiveAccount.MemoryAccount{Password: u.UUID}
+
+	case "mieru":
+		mu.Account = &mieruAccount.MemoryAccount{Name: u.UUID, Password: u.UUID}
 
 	default:
 		return nil, fmt.Errorf("protocol %q does not support MemoryUser", proto)

@@ -1,6 +1,10 @@
 # Binaries
 /xboard-node
 /xboard-node-linux-*
+/fboard-node
+/fboard-node-linux-*
+/fbctl
+/xbctl
 *.exe
 
 # Config files (may contain secrets)

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cedar2025/xboard-node/internal/config"
-	"github.com/cedar2025/xboard-node/internal/panel"
+	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/panel"
 )
 
 func TestNodeSpecFromPanelValidated(t *testing.T) {
@@ -46,21 +46,6 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 		}
 	})
 
-	t.Run("reject unsupported protocol for kernel", func(t *testing.T) {
-		_, err := NodeSpecFromPanelValidated(&panel.NodeConfig{
-			Protocol:   "shadowsocks",
-			ServerPort: 8388,
-			CustomOutbounds: []panel.OutboundConfig{{
-				Tag: "hy2", Protocol: "hysteria2", Settings: map[string]any{"server": "2.2.2.2", "server_port": 8443},
-			}},
-		}, config.KernelConfig{})
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if !strings.Contains(err.Error(), `protocol "hysteria2" is not supported by kernel "xray"`) {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
 
 	t.Run("reject unknown route target", func(t *testing.T) {
 		_, err := NodeSpecFromPanelValidated(&panel.NodeConfig{

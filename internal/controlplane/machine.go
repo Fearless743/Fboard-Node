@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cedar2025/xboard-node/internal/config"
-	"github.com/cedar2025/xboard-node/internal/model"
-	"github.com/cedar2025/xboard-node/internal/nlog"
-	"github.com/cedar2025/xboard-node/internal/panel"
+	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/nlog"
+	"github.com/fearless743/fboard-node/internal/panel"
 )
 
 // MachinePanelControlPlane implements ControlPlane for a single node running

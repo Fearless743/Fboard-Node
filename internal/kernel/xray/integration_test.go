@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cedar2025/xboard-node/internal/config"
-	"github.com/cedar2025/xboard-node/internal/kernel"
-	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/kernel"
+	"github.com/fearless743/fboard-node/internal/model"
 	"github.com/xtls/xray-core/features/routing"
 )
 
@@ -63,7 +63,7 @@ var integrationTestUsers = []model.UserSpec{
 
 func testXrayProtocol(t *testing.T, nc *model.NodeSpec, port int) {
 	t.Helper()
-	x := New(config.KernelConfig{Type: "xray", LogLevel: "warn"})
+	x := New(config.KernelConfig{LogLevel: "warn"})
 
 	err := x.Start(nc, integrationTestUsers, kernel.TLSCert{})
 	if err != nil {
@@ -269,7 +269,7 @@ func TestXrayIntegration_LimitDispatcher(t *testing.T) {
 		ServerPort: port,
 		Cipher:     "aes-128-gcm",
 	}
-	x := New(config.KernelConfig{Type: "xray", LogLevel: "debug"})
+	x := New(config.KernelConfig{LogLevel: "debug"})
 
 	err := x.Start(nc, integrationTestUsers, kernel.TLSCert{})
 	if err != nil {
@@ -306,7 +306,7 @@ func TestXrayIntegration_RestartSamePort(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		x := New(config.KernelConfig{Type: "xray", LogLevel: "warn"})
+		x := New(config.KernelConfig{LogLevel: "warn"})
 		err := x.Start(nc, integrationTestUsers, kernel.TLSCert{})
 		if err != nil {
 			t.Fatalf("iteration %d: Start() error = %v", i, err)

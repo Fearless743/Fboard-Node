@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cedar2025/xboard-node/internal/config"
-	"github.com/cedar2025/xboard-node/internal/kernel"
-	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/kernel"
+	"github.com/fearless743/fboard-node/internal/model"
 )
 
 func startEchoServer(t *testing.T) (int, func()) {
@@ -123,7 +123,7 @@ func TestE2E_SOCKS5_ProxyDataFlow(t *testing.T) {
 		ServerPort: socksPort,
 	})
 
-	x := New(config.KernelConfig{Type: "xray", LogLevel: "warn"})
+	x := New(config.KernelConfig{LogLevel: "warn"})
 	if err := x.Start(nc, integrationTestUsers, kernel.TLSCert{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestE2E_SOCKS5_MultipleConnections(t *testing.T) {
 		ServerPort: socksPort,
 	})
 
-	x := New(config.KernelConfig{Type: "xray", LogLevel: "warn"})
+	x := New(config.KernelConfig{LogLevel: "warn"})
 	if err := x.Start(nc, integrationTestUsers, kernel.TLSCert{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestE2E_HTTP_ProxyDataFlow(t *testing.T) {
 		ServerPort: httpPort,
 	})
 
-	x := New(config.KernelConfig{Type: "xray", LogLevel: "warn"})
+	x := New(config.KernelConfig{LogLevel: "warn"})
 	if err := x.Start(nc, integrationTestUsers, kernel.TLSCert{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

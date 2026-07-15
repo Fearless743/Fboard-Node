@@ -3,7 +3,7 @@ package controlplane
 import (
 	"context"
 
-	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/model"
 )
 
 type EventType string
@@ -13,6 +13,8 @@ const (
 	EventSyncUsers     EventType = "sync.users"
 	EventSyncUserDelta EventType = "sync.user.delta"
 	EventSyncDevices   EventType = "sync.devices"
+	EventSyncUpgrade   EventType = "sync.upgrade"
+	EventSyncRestart   EventType = "sync.restart"
 )
 
 type Event struct {
