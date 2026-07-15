@@ -6,25 +6,18 @@ import (
 	"strings"
 )
 
-func ValidateCustomRouteRules(rules []CustomRouteRule, kernelType string, availableTags map[string]struct{}) error {
+func ValidateCustomRouteRules(rules []CustomRouteRule, availableTags map[string]struct{}) error {
 	if len(rules) == 0 {
 		return nil
 	}
 
-	kernelType = strings.ToLower(strings.TrimSpace(kernelType))
 	matcherSupport := map[string]struct{}{}
 	actionSupport := map[string]struct{}{}
-	if kernelType != "" {
-		support, ok := RouteSupportMatrix()[kernelType]
-		if !ok {
-			return fmt.Errorf("unsupported kernel type %q", kernelType)
-		}
-		for _, matcher := range support.Matchers {
-			matcherSupport[strings.ToLower(matcher)] = struct{}{}
-		}
-		for _, action := range support.Actions {
-			actionSupport[strings.ToLower(action)] = struct{}{}
-		}
+	for _, matcher := range SupportedRouteMatchers() {
+		matcherSupport[strings.ToLower(matcher)] = struct{}{}
+	}
+	for _, action := range SupportedRouteActions() {
+		actionSupport[strings.ToLower(action)] = struct{}{}
 	}
 
 	for i, rule := range rules {
@@ -34,7 +27,7 @@ func ValidateCustomRouteRules(rules []CustomRouteRule, kernelType string, availa
 		if !hasRouteMatch(rule.Match) {
 			return fmt.Errorf("custom_route_rules[%d].match is required", i)
 		}
-		if err := ensureRouteMatcherSupported(i, kernelType, matcherSupport, rule.Match); err != nil {
+		if err := ensureRouteMatcherSupported(i, matcherSupport, rule.Match); err != nil {
 			return err
 		}
 		if err := validatePortSpecs(rule.Match.Ports, fmt.Sprintf("custom_route_rules[%d].match.ports", i)); err != nil {
@@ -51,10 +44,8 @@ func ValidateCustomRouteRules(rules []CustomRouteRule, kernelType string, availa
 		if actionType == "" {
 			return fmt.Errorf("custom_route_rules[%d].action.type is required", i)
 		}
-		if kernelType != "" {
-			if _, ok := actionSupport[actionType]; !ok {
-				return fmt.Errorf("custom_route_rules[%d].action.type %q is not supported by kernel %q", i, rule.Action.Type, kernelType)
-			}
+		if _, ok := actionSupport[actionType]; !ok {
+			return fmt.Errorf("custom_route_rules[%d].action.type %q is not supported", i, rule.Action.Type)
 		}
 		target := strings.TrimSpace(rule.Action.Target)
 		switch actionType {
@@ -98,10 +89,7 @@ func hasRouteMatch(match RouteMatch) bool {
 	return false
 }
 
-func ensureRouteMatcherSupported(index int, kernelType string, matcherSupport map[string]struct{}, match RouteMatch) error {
-	if kernelType == "" {
-		return nil
-	}
+func ensureRouteMatcherSupported(index int, matcherSupport map[string]struct{}, match RouteMatch) error {
 	checks := map[string][]string{
 		"domains":         match.Domains,
 		"domain_suffixes": match.DomainSuffixes,
@@ -116,7 +104,7 @@ func ensureRouteMatcherSupported(index int, kernelType string, matcherSupport ma
 			continue
 		}
 		if _, ok := matcherSupport[matcher]; !ok {
-			return fmt.Errorf("custom_route_rules[%d].match.%s is not supported by kernel %q", index, matcher, kernelType)
+			return fmt.Errorf("custom_route_rules[%d].match.%s is not supported", index, matcher)
 		}
 	}
 	return nil

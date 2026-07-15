@@ -25,14 +25,12 @@ var (
 	onlineMapPool  = sync.Pool{New: func() interface{} { return make(map[string]int) }}
 )
 
-// Client communicates with the Xboard panel API.
-// When machineID > 0 the client uses machine-level authentication
-// (machine_id + token) instead of the legacy (token + node_type) scheme.
+// Client communicates with the Fboard panel API using machine authentication
+// (token + machine_id, and node_id for per-node calls).
 type Client struct {
 	baseURL    string
 	token      string
 	nodeID     int
-	nodeType   string
 	machineID  int
 	httpClient *http.Client
 
@@ -49,7 +47,6 @@ func NewClient(cfg config.PanelConfig) *Client {
 		baseURL:   strings.TrimRight(cfg.URL, "/"),
 		token:     cfg.Token,
 		nodeID:    cfg.NodeID,
-		nodeType:  cfg.NodeType,
 		machineID: cfg.MachineID,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -69,7 +66,6 @@ func (c *Client) ForNode(nodeID int) *Client {
 		baseURL:    c.baseURL,
 		token:      c.token,
 		nodeID:     nodeID,
-		nodeType:   c.nodeType,
 		machineID:  c.machineID,
 		httpClient: c.httpClient,
 	}
@@ -198,22 +194,9 @@ func decodeWeakRaw(input map[string]interface{}, output interface{}) error {
 	return decoder.Decode(input)
 }
 
-// configPath returns the API path for config fetching.
-// Machine mode uses the v2 endpoint; legacy mode uses the v1 UniProxy endpoint.
-func (c *Client) configPath() string {
-	if c.machineID > 0 {
-		return "/api/v2/server/config"
-	}
-	return "/api/v1/server/UniProxy/config"
-}
+func (c *Client) configPath() string { return "/api/v2/server/config" }
 
-// userPath returns the API path for user fetching.
-func (c *Client) userPath() string {
-	if c.machineID > 0 {
-		return "/api/v2/server/user"
-	}
-	return "/api/v1/server/UniProxy/user"
-}
+func (c *Client) userPath() string { return "/api/v2/server/user" }
 
 // GetConfig fetches node configuration. Returns nil if not modified (304).
 func (c *Client) GetConfig() (*NodeConfig, error) {
@@ -289,7 +272,7 @@ func (c *Client) PushTraffic(data map[int][2]int64) error {
 	for uid, traffic := range data {
 		payload[strconv.Itoa(uid)] = traffic
 	}
-	return c.postJSON("/api/v1/server/UniProxy/push", payload)
+	return c.postJSON("/api/v2/server/push", payload)
 }
 
 // PushAlive submits online user IPs
@@ -301,7 +284,7 @@ func (c *Client) PushAlive(data map[int][]string) error {
 	for uid, ips := range data {
 		payload[strconv.Itoa(uid)] = ips
 	}
-	return c.postJSON("/api/v1/server/UniProxy/alive", payload)
+	return c.postJSON("/api/v2/server/alive", payload)
 }
 
 // PushStatus submits system status to the panel
@@ -312,7 +295,7 @@ func (c *Client) PushStatus(cpu float64, mem, swap, disk [2]uint64) error {
 		"swap": map[string]interface{}{"total": swap[0], "used": swap[1]},
 		"disk": map[string]interface{}{"total": disk[0], "used": disk[1]},
 	}
-	return c.postJSON("/api/v1/server/UniProxy/status", payload)
+	return c.postJSON("/api/v2/server/status", payload)
 }
 
 // ResetETags clears cached ETags, forcing full responses
@@ -356,19 +339,12 @@ func (c *Client) ReportMachineStatus(cpu float64, mem, swap, disk [2]uint64, net
 	return c.postJSON("/api/v2/server/machine/status", payload)
 }
 
-// injectAuth writes authentication fields into a payload map.
+// injectAuth writes machine authentication fields into a payload map.
 func (c *Client) injectAuth(m map[string]interface{}) {
 	m["token"] = c.token
-	if c.machineID > 0 {
-		m["machine_id"] = c.machineID
-		if c.nodeID > 0 {
-			m["node_id"] = c.nodeID
-		}
-	} else {
+	m["machine_id"] = c.machineID
+	if c.nodeID > 0 {
 		m["node_id"] = c.nodeID
-		if c.nodeType != "" {
-			m["node_type"] = c.nodeType
-		}
 	}
 }
 
@@ -376,16 +352,9 @@ func (c *Client) injectAuth(m map[string]interface{}) {
 func (c *Client) authQuery() url.Values {
 	q := url.Values{}
 	q.Set("token", c.token)
-	if c.machineID > 0 {
-		q.Set("machine_id", strconv.Itoa(c.machineID))
-		if c.nodeID > 0 {
-			q.Set("node_id", strconv.Itoa(c.nodeID))
-		}
-	} else {
+	q.Set("machine_id", strconv.Itoa(c.machineID))
+	if c.nodeID > 0 {
 		q.Set("node_id", strconv.Itoa(c.nodeID))
-		if c.nodeType != "" {
-			q.Set("node_type", c.nodeType)
-		}
 	}
 	return q
 }

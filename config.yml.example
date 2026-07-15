@@ -1,24 +1,32 @@
-# Xboard Node Configuration
+# Fboard-Node configuration (machine mode only)
 # Top-level settings are inherited by all instances. Instance overrides take precedence.
 
-# ── Single node (simplest) ──
-# panel:
-#   url: "https://panel.example.com"
-#   token: "your-api-key"
-#   node_id: 1
+panel:
+  url: "https://panel.example.com"
+machine:
+  machine_id: 1
+  token: "your-machine-token"
+  # token_env: "MACHINE_TOKEN"   # optional: read token from env
 
-# ── Multiple instances ──
+# Optional tuning
 # log:
 #   level: "info"
+# node:
+#   push_interval: 60
+#   pull_interval: 60
+# kernel:
+#   log_level: "warn"
+# health_port: 65530
+
+# Multiple panel machines in one process:
 # instances:
 #   - panel:
-#       url: "https://panel.example.com"
-#       token: "api-key-1"
-#       node_id: 1
+#       url: "https://panel-a.example.com"
+#     machine:
+#       machine_id: 1
+#       token: "token-a"
 #   - panel:
-#       url: "https://panel.example.com"
+#       url: "https://panel-b.example.com"
 #     machine:
 #       machine_id: 2
-#       token: "machine-token-2"
-#     log:
-#       level: "debug"   # override for this instance only
+#       token: "token-b"

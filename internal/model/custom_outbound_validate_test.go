@@ -9,7 +9,6 @@ func TestValidateCustomOutbounds(t *testing.T) {
 	tests := []struct {
 		name      string
 		outbounds []OutboundConfig
-		kernel    string
 		wantErr   string
 	}{
 		{
@@ -18,12 +17,10 @@ func TestValidateCustomOutbounds(t *testing.T) {
 				{Tag: "warp", Protocol: "wireguard", Settings: map[string]any{"server": "1.1.1.1", "server_port": 2408, "private_key": "pk"}},
 				{Tag: "proxy", Protocol: "socks", ProxyTag: "warp", Settings: map[string]any{"server": "2.2.2.2", "server_port": 1080}},
 			},
-			kernel: "xray",
 		},
 		{
 			name:      "valid native vmess settings preserved",
 			outbounds: []OutboundConfig{{Tag: "vmess-native", Protocol: "vmess", Settings: map[string]any{"vnext": []any{map[string]any{"address": "1.1.1.1", "port": 443}}}}},
-			kernel:    "xray",
 		},
 		{
 			name:      "missing tag",
@@ -86,7 +83,7 @@ func TestValidateCustomOutbounds(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateCustomOutboundsForKernel(tc.outbounds, tc.kernel, nil)
+			err := ValidateCustomOutbounds(tc.outbounds)
 			if tc.wantErr == "" && err != nil {
 				t.Fatalf("expected no error, got %v", err)
 			}

@@ -22,7 +22,7 @@ CLI_PATH="/usr/local/bin/fbctl"
 INSTALLER_COPY_PATH="${INSTALL_ROOT}/install.sh"
 CLI_BINARY_SOURCE=""
 DEFAULT_HEALTH_PORT=65530
-DEFAULT_MODE="node"
+DEFAULT_MODE="machine"
 DEFAULT_ACTION="install"
 DEFAULT_RELEASE_VERSION="latest"
 DEFAULT_LOG_LEVEL="info"
@@ -175,22 +175,15 @@ usage() {
     status       Show current installation status
     help         Show this help
 
-  MODES (auto-detected from --node-id or --machine-id if omitted):
-    --mode node      Panel single-node mode (default)
-    --mode machine   Panel machine mode
+  MODE:
+    Machine mode only (panel machine_id + machine token).
 
-  REQUIRED FOR NODE MODE:
-    --panel, -a      Panel URL
-    --token, -t      Panel server token
-    --node-id, -n    Node ID
-
-  REQUIRED FOR MACHINE MODE:
+  REQUIRED:
     --panel, -a       Panel URL
     --token, -t       Machine token
     --machine-id      Machine ID
 
   OPTIONAL:
-    --node-type, -T     Explicit node type for node mode
     --version           Release version or latest (default: latest)
     --binary            Use a local fboard-node binary path instead of downloading
     --fbctl-binary      Use a local fbctl binary path instead of downloading
@@ -202,7 +195,6 @@ usage() {
     --yes, -y           Non-interactive confirmation for destructive operations
 
   EXAMPLES:
-    sudo bash install.sh --panel https://panel.example.com --token TOKEN --node-id 1
     sudo bash install.sh --panel https://panel.example.com --token TOKEN --machine-id 1
     sudo bash install.sh upgrade
     sudo bash install.sh uninstall --purge --yes
@@ -293,23 +285,23 @@ parse_args() {
         ACTION="${positional[0]}"
     fi
 
-    # Auto-detect mode from arguments when --mode is not specified.
+    # Machine mode only.
     if [ -z "$MODE" ]; then
-        if [ -n "$MACHINE_ID" ]; then
-            MODE="machine"
-        else
-            MODE="node"
-        fi
+        MODE="machine"
     fi
-
-    case "$MODE" in
-        node|machine) ;;
-        *)
-            log_error "Unsupported mode: $MODE"
-            usage
-            exit 1
-            ;;
-    esac
+    if [ "$MODE" = "node" ]; then
+        log_error "node mode has been removed; use --machine-id (machine mode)"
+        exit 1
+    fi
+    if [ "$MODE" != "machine" ]; then
+        log_error "Unsupported mode: $MODE (only machine is supported)"
+        usage
+        exit 1
+    fi
+    if [ -n "$NODE_ID" ] || [ -n "$NODE_TYPE" ]; then
+        log_error "--node-id/--node-type have been removed; use --machine-id"
+        exit 1
+    fi
 }
 
 check_root() {
@@ -474,14 +466,7 @@ validate_install_request() {
     if [ "$HEALTH_PORT" -eq 0 ]; then
         HEALTH_ENABLED=0
     fi
-    case "$MODE" in
-        node)
-            validate_positive_int "Node ID" "$NODE_ID"
-            ;;
-        machine)
-            validate_positive_int "Machine ID" "$MACHINE_ID"
-            ;;
-    esac
+    validate_positive_int "Machine ID" "$MACHINE_ID"
 }
 
 detect_current_state() {
@@ -615,14 +600,7 @@ render_config() {
     if [ -f "$CREDENTIALS_FILE" ]; then
         init_args+=(--credentials-in "$CREDENTIALS_FILE")
     fi
-    if [ "$MODE" = "machine" ]; then
-        init_args+=(--machine-id "$MACHINE_ID")
-    else
-        init_args+=(--node-id "$NODE_ID")
-        if [ -n "$NODE_TYPE" ]; then
-            init_args+=(--node-type "$NODE_TYPE")
-        fi
-    fi
+    init_args+=(--machine-id "$MACHINE_ID")
     if [ -n "$RUNTIME_GOMEMLIMIT" ]; then
         init_args+=(--gomemlimit "$RUNTIME_GOMEMLIMIT")
     fi

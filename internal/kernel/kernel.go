@@ -33,7 +33,7 @@ func (t TLSCert) HasCert() bool {
 	return len(t.CertPEM) > 0 && len(t.KeyPEM) > 0
 }
 
-// Kernel is the interface for proxy kernel backends (sing-box, xray, etc.).
+// Kernel is the interface for the embedded xray-core backend.
 //
 // The interface is split into lifecycle, user management, and observability
 // groups. User operations (AddUsers/RemoveUsers) are designed to be atomic
@@ -43,7 +43,7 @@ func (t TLSCert) HasCert() bool {
 // Implementors: xray.Xray
 type Kernel interface {
 	// ─── Identity ───────────────────────────────────────────────────────
-	// Name returns the kernel identifier (e.g. "sing-box", "xray").
+	// Name returns the kernel identifier ("xray").
 	Name() string
 	// Protocols returns the protocol names this kernel supports.
 	Protocols() []string

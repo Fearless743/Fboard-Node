@@ -21,8 +21,8 @@ Node backend for [Fboard](https://github.com/Fearless743/Fboard). Based on [Xboa
 - 内核: xray-core（单内核，已移除 sing-box / mihomo）
 - 同步: WebSocket 推送 + REST 轮询双通道
 - 用户控制: 限速、设备限制、在线 IP 追踪、热更新
-- 部署模式: 节点模式、机器模式、独立模式
-- 多实例: 单进程绑定多个面板/节点
+- 部署模式: 机器模式（动态发现绑定节点）
+- 多实例: 单进程绑定多个面板机器
 - 远程操作: 面板端远程升级和重启
 
 ## 安装
@@ -32,7 +32,7 @@ Node backend for [Fboard](https://github.com/Fearless743/Fboard). Based on [Xboa
 ```bash
 # 节点模式
 curl -fsSL https://raw.githubusercontent.com/Fearless743/fboard-node/dev/install.sh | \
-  sudo bash -s -- --mode node --panel https://panel.example.com --token TOKEN --node-id 1
+  sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --node-id 1
 
 # 机器模式
 curl -fsSL https://raw.githubusercontent.com/Fearless743/fboard-node/dev/install.sh | \
@@ -48,9 +48,8 @@ fbctl list                          # 列出所有实例
 fbctl status                        # 运行状态
 fbctl service restart               # 重启服务
 fbctl upgrade                       # 升级二进制
-fbctl bind add-node --panel URL --token TOKEN --node-id 1
-fbctl bind add-machine --panel URL --token TOKEN --machine-id 1
-fbctl bind remove-node --panel URL --node-id 1
+fbctl bind add-machine --panel-url URL --token TOKEN --machine-id 1
+fbctl bind remove-machine --panel URL --machine-id 1
 ```
 
 ### 手动构建
@@ -69,7 +68,7 @@ sudo fboard-node -c /etc/fboard-node/config.yml
 
 ## 配置
 
-传统单面板配置完全兼容。追加 bindings 自动迁移到 `instances` 格式。详见 `config.yml.example`。
+仅支持机器模式配置。详见 `config.yml.example`；旧 node 配置请用 `migrate-from-xboard-node.sh` 迁移。
 
 ## 扩展
 

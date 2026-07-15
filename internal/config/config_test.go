@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,13 +18,13 @@ func writeTemp(t *testing.T, content string) string {
 	return path
 }
 
-func TestLoad_ValidConfig(t *testing.T) {
+func TestLoad_ValidMachineConfig(t *testing.T) {
 	path := writeTemp(t, `
 panel:
   url: "https://panel.example.com"
+machine:
+  machine_id: 5
   token: "secret-token"
-  node_id: 5
-  node_type: "v2ray"
 kernel:
   log_level: warn
 log:
@@ -36,17 +37,17 @@ log:
 	if cfg.Panel.URL != "https://panel.example.com" {
 		t.Errorf("url: got %q", cfg.Panel.URL)
 	}
-	if cfg.Panel.Token != "secret-token" {
-		t.Errorf("token: got %q", cfg.Panel.Token)
+	if cfg.Machine == nil || cfg.Machine.Token != "secret-token" {
+		t.Errorf("machine.token: got %+v", cfg.Machine)
 	}
-	if cfg.Panel.NodeID != 5 {
-		t.Errorf("node_id: got %d", cfg.Panel.NodeID)
-	}
-	if cfg.Panel.NodeType != "v2ray" {
-		t.Errorf("node_type: got %q", cfg.Panel.NodeType)
+	if cfg.Machine.MachineID != 5 {
+		t.Errorf("machine_id: got %d", cfg.Machine.MachineID)
 	}
 	if cfg.Log.Level != "debug" {
 		t.Errorf("log.level: got %q", cfg.Log.Level)
+	}
+	if !cfg.IsMachineMode() {
+		t.Fatal("expected machine mode")
 	}
 }
 
@@ -54,14 +55,14 @@ func TestLoad_Defaults(t *testing.T) {
 	path := writeTemp(t, `
 panel:
   url: "https://panel.example.com"
+machine:
+  machine_id: 1
   token: "tok"
-  node_id: 1
 `)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	// config_dir should default to the directory containing the config file.
 	expectedDir := filepath.Dir(path)
 	if cfg.Kernel.ConfigDir != expectedDir {
 		t.Errorf("default config_dir: got %q, want %q", cfg.Kernel.ConfigDir, expectedDir)
@@ -86,9 +87,9 @@ panel:
 
 func TestLoad_MissingURL(t *testing.T) {
 	path := writeTemp(t, `
-panel:
+machine:
+  machine_id: 1
   token: "tok"
-  node_id: 1
 `)
 	_, err := Load(path)
 	if err == nil {
@@ -96,41 +97,67 @@ panel:
 	}
 }
 
-func TestLoad_MissingToken(t *testing.T) {
+func TestLoad_MissingMachineToken(t *testing.T) {
 	path := writeTemp(t, `
 panel:
   url: "https://example.com"
+machine:
+  machine_id: 1
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for missing machine.token")
+	}
+}
+
+func TestLoad_RejectsLegacyNodeMode(t *testing.T) {
+	path := writeTemp(t, `
+panel:
+  url: "https://example.com"
+  token: "tok"
   node_id: 1
 `)
 	_, err := Load(path)
 	if err == nil {
-		t.Fatal("expected error for missing token")
+		t.Fatal("expected error for legacy node mode")
+	}
+	if !strings.Contains(err.Error(), "node") && !strings.Contains(err.Error(), "removed") {
+		t.Fatalf("error should mention removed node mode: %v", err)
 	}
 }
 
-func TestLoad_InvalidNodeID(t *testing.T) {
+func TestLoad_RejectsStandalone(t *testing.T) {
+	path := writeTemp(t, `
+standalone:
+  enabled: true
+  node:
+    protocol: "vless"
+    server_port: 8443
+  users:
+    - id: 1
+      uuid: "11111111-1111-1111-1111-111111111111"
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for standalone")
+	}
+	if !strings.Contains(err.Error(), "standalone") {
+		t.Fatalf("error should mention standalone: %v", err)
+	}
+}
+
+func TestLoad_RejectsStaticNodes(t *testing.T) {
 	path := writeTemp(t, `
 panel:
   url: "https://example.com"
   token: "tok"
-  node_id: 0
+nodes:
+  - node_id: 1
+  - node_id: 2
 `)
 	_, err := Load(path)
 	if err == nil {
-		t.Fatal("expected error for node_id=0")
-	}
-}
-
-func TestLoad_NegativeNodeID(t *testing.T) {
-	path := writeTemp(t, `
-panel:
-  url: "https://example.com"
-  token: "tok"
-  node_id: -1
-`)
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for negative node_id")
+		t.Fatal("expected error for static nodes list")
 	}
 }
 
@@ -138,8 +165,9 @@ func TestLoad_AutoTLS_NoDomain(t *testing.T) {
 	path := writeTemp(t, `
 panel:
   url: "https://example.com"
+machine:
+  machine_id: 1
   token: "tok"
-  node_id: 1
 cert:
   auto_tls: true
 `)
@@ -153,8 +181,9 @@ func TestLoad_AutoTLS_WithDomain(t *testing.T) {
 	path := writeTemp(t, `
 panel:
   url: "https://example.com"
+machine:
+  machine_id: 1
   token: "tok"
-  node_id: 1
 cert:
   auto_tls: true
   domain: "node.example.com"
@@ -191,8 +220,9 @@ func TestLoad_CustomCert(t *testing.T) {
 	path := writeTemp(t, `
 panel:
   url: "https://example.com"
+machine:
+  machine_id: 1
   token: "tok"
-  node_id: 1
 cert:
   cert_file: "/custom/cert.pem"
   key_file: "/custom/key.pem"
@@ -213,8 +243,9 @@ func TestLoad_CustomIntervals(t *testing.T) {
 	path := writeTemp(t, `
 panel:
   url: "https://example.com"
+machine:
+  machine_id: 1
   token: "tok"
-  node_id: 1
 node:
   push_interval: 30
   pull_interval: 60
@@ -231,68 +262,13 @@ node:
 	}
 }
 
-func TestLoad_StandaloneConfig(t *testing.T) {
-	path := writeTemp(t, `
-standalone:
-  enabled: true
-  node:
-    protocol: "vless"
-    server_port: 8443
-    network: "ws"
-    tls: 1
-    network_settings:
-      path: "/ws"
-  users:
-    - id: 1
-      uuid: "11111111-1111-1111-1111-111111111111"
-kernel:
-  type: xray
-cert:
-  cert_mode: none
-`)
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if !cfg.IsStandalone() {
-		t.Fatal("expected standalone mode to be enabled")
-	}
-	if cfg.Standalone.Node.Protocol != "vless" {
-		t.Errorf("standalone.node.protocol: got %q", cfg.Standalone.Node.Protocol)
-	}
-	if cfg.Standalone.Node.ServerPort != 8443 {
-		t.Errorf("standalone.node.server_port: got %d", cfg.Standalone.Node.ServerPort)
-	}
-	if len(cfg.Standalone.Users) != 1 {
-		t.Fatalf("standalone.users: got %d", len(cfg.Standalone.Users))
-	}
-	if cfg.Standalone.Users[0].UUID != "11111111-1111-1111-1111-111111111111" {
-		t.Errorf("standalone.users[0].uuid: got %q", cfg.Standalone.Users[0].UUID)
-	}
-}
-
-func TestLoad_StandaloneRequiresUsers(t *testing.T) {
-	path := writeTemp(t, `
-standalone:
-  enabled: true
-  node:
-    protocol: "trojan"
-    server_port: 443
-kernel:
-`)
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for standalone mode without users")
-	}
-}
-
-
 func TestLoadRoot_LegacyConfigNormalizesToSingleInstance(t *testing.T) {
 	path := writeTemp(t, `
 panel:
   url: "https://panel.example.com"
+machine:
+  machine_id: 1
   token: "tok"
-  node_id: 1
 `)
 	root, err := LoadRoot(path)
 	if err != nil {
@@ -318,8 +294,9 @@ func TestLoadRoot_InstancesConfig(t *testing.T) {
 instances:
   - panel:
       url: "https://panel-a.example.com"
-      token_env: "PANEL_A_TOKEN"
-      node_id: 1
+    machine:
+      machine_id: 1
+      token_env: "PANEL_A_MACHINE_TOKEN"
     kernel:
   - panel:
       url: "https://panel-b.example.com"
@@ -328,7 +305,7 @@ instances:
       token_env: "PANEL_B_MACHINE_TOKEN"
     kernel:
 `)
-	t.Setenv("PANEL_A_TOKEN", "token-a")
+	t.Setenv("PANEL_A_MACHINE_TOKEN", "token-a")
 	t.Setenv("PANEL_B_MACHINE_TOKEN", "token-b")
 	root, err := LoadRoot(path)
 	if err != nil {
@@ -341,11 +318,11 @@ instances:
 	if len(instances) != 2 {
 		t.Fatalf("instances: got %d, want 2", len(instances))
 	}
-	if instances[0].Panel.Token != "token-a" {
-		t.Errorf("panel a token: got %q", instances[0].Panel.Token)
+	if instances[0].Machine == nil || instances[0].Machine.Token != "token-a" {
+		t.Errorf("machine a token: got %+v", instances[0].Machine)
 	}
 	if instances[1].Machine == nil || instances[1].Machine.Token != "token-b" {
-		t.Fatalf("machine token: got %+v", instances[1].Machine)
+		t.Fatalf("machine b token: got %+v", instances[1].Machine)
 	}
 	if instances[0].InstanceID == instances[1].InstanceID {
 		t.Fatal("expected unique instance ids")
@@ -353,7 +330,10 @@ instances:
 }
 
 func TestConfig_AutoInstanceIDStable(t *testing.T) {
-	cfg := &Config{Panel: PanelConfig{URL: "https://Panel.Example.com/", NodeID: 1, Token: "tok"}}
+	cfg := &Config{
+		Panel:   PanelConfig{URL: "https://Panel.Example.com/"},
+		Machine: &MachineConfig{MachineID: 1, Token: "tok"},
+	}
 	cfg.setDefaultsFrom("/etc/fboard-node")
 	id1, err := cfg.AutoInstanceID()
 	if err != nil {
@@ -366,6 +346,9 @@ func TestConfig_AutoInstanceIDStable(t *testing.T) {
 	if id1 != id2 {
 		t.Fatalf("ids differ: %q vs %q", id1, id2)
 	}
+	if !strings.Contains(id1, "machine-1") {
+		t.Fatalf("id should contain machine-1: %q", id1)
+	}
 }
 
 func TestLoadRoot_InheritanceFromTopLevel(t *testing.T) {
@@ -374,7 +357,6 @@ log:
   level: "debug"
   output: "stderr"
 kernel:
-  type: xray
   log_level: "error"
 node:
   push_interval: 42
@@ -382,12 +364,14 @@ node:
 instances:
   - panel:
       url: "https://panel.example.com"
+    machine:
+      machine_id: 1
       token: "tok-a"
-      node_id: 1
   - panel:
       url: "https://panel.example.com"
+    machine:
+      machine_id: 2
       token: "tok-b"
-      node_id: 2
     log:
       level: "warn"
 `)
@@ -398,7 +382,6 @@ instances:
 	if len(root.Instances) != 2 {
 		t.Fatalf("instances: got %d, want 2", len(root.Instances))
 	}
-	// Instance 0: inherits everything from top-level.
 	inst0 := root.Instances[0]
 	if inst0.Log.Level != "debug" {
 		t.Errorf("inst0 log.level: got %q, want %q", inst0.Log.Level, "debug")
@@ -415,7 +398,6 @@ instances:
 	if inst0.Node.PullInterval != 99 {
 		t.Errorf("inst0 pull_interval: got %d, want 99", inst0.Node.PullInterval)
 	}
-	// Instance 1: overrides log.level, inherits the rest.
 	inst1 := root.Instances[1]
 	if inst1.Log.Level != "warn" {
 		t.Errorf("inst1 log.level: got %q, want %q", inst1.Log.Level, "warn")
@@ -431,12 +413,14 @@ func TestLoadRoot_InstanceOrderDoesNotAffectConfigDir(t *testing.T) {
 instances:
   - panel:
       url: "https://panel.example.com"
+    machine:
+      machine_id: %d
       token: "tok-a"
-      node_id: %d
   - panel:
       url: "https://panel.example.com"
+    machine:
+      machine_id: %d
       token: "tok-b"
-      node_id: %d
 `, first, second)
 	}
 
@@ -450,47 +434,83 @@ instances:
 	if err != nil {
 		t.Fatalf("LoadRoot order2: %v", err)
 	}
-
-	// Collect the config_dir suffix (relative to base) by InstanceID.
-	suffix := func(instances []Config) map[string]string {
-		m := map[string]string{}
-		for _, inst := range instances {
-			// The config_dir ends with .../{instanceID}, extract last component.
-			m[inst.InstanceID] = filepath.Base(inst.Kernel.ConfigDir)
+	// Instance IDs (and thus relative config dirs) must be stable across YAML order.
+	idFor := func(root *RootConfig, machineID int) string {
+		for i := range root.Instances {
+			if root.Instances[i].Machine != nil && root.Instances[i].Machine.MachineID == machineID {
+				return root.Instances[i].InstanceID
+			}
 		}
-		return m
+		t.Fatalf("machine %d not found", machineID)
+		return ""
 	}
-	dirs1 := suffix(root1.Instances)
-	dirs2 := suffix(root2.Instances)
+	if idFor(root1, 1) != idFor(root2, 1) {
+		t.Fatalf("machine 1 instance id differs by order: %q vs %q", idFor(root1, 1), idFor(root2, 1))
+	}
+	if idFor(root1, 2) != idFor(root2, 2) {
+		t.Fatalf("machine 2 instance id differs by order: %q vs %q", idFor(root1, 2), idFor(root2, 2))
+	}
+}
 
-	for id, s1 := range dirs1 {
-		s2, ok := dirs2[id]
-		if !ok {
-			t.Fatalf("instance %q missing in reversed order", id)
-		}
-		if s1 != s2 {
-			t.Errorf("instance %q config_dir suffix differs: %q vs %q", id, s1, s2)
-		}
+func TestExpandMachineNode(t *testing.T) {
+	cfg := &Config{
+		Panel:   PanelConfig{URL: "https://panel.example.com"},
+		Machine: &MachineConfig{MachineID: 9, Token: "mtok"},
+		Kernel:  KernelConfig{ConfigDir: "/data", GeoDataDir: "/data"},
+		Cert:    CertConfig{},
+	}
+	cfg.setDefaultsFrom("/data")
+	node := cfg.ExpandMachineNode(42, "vless")
+	if node.Panel.NodeID != 42 {
+		t.Errorf("NodeID: got %d", node.Panel.NodeID)
+	}
+	if node.Panel.NodeType != "vless" {
+		t.Errorf("NodeType: got %q", node.Panel.NodeType)
+	}
+	if node.Panel.Token != "mtok" {
+		t.Errorf("Token: got %q", node.Panel.Token)
+	}
+	if node.Panel.MachineID != 9 {
+		t.Errorf("MachineID: got %d", node.Panel.MachineID)
+	}
+	if node.Kernel.ConfigDir != "/data/node-42" {
+		t.Errorf("ConfigDir: got %q", node.Kernel.ConfigDir)
 	}
 }
 
 func TestInheritFrom_AutoTLSNotForcedWhenChildHasCertMode(t *testing.T) {
-	parent := &Config{Cert: CertConfig{AutoTLS: true, Domain: "example.com"}}
-	child := &Config{Cert: CertConfig{CertMode: "file", CertFile: "/etc/cert.pem"}}
+	parent := &Config{Cert: CertConfig{AutoTLS: true, Domain: "a.example.com"}}
+	child := &Config{Cert: CertConfig{CertMode: "none"}}
 	child.inheritFrom(parent)
 	if child.Cert.AutoTLS {
-		t.Error("auto_tls should NOT be inherited when child has explicit cert_mode")
-	}
-	if child.Cert.Domain != "example.com" {
-		t.Errorf("domain: got %q, want %q", child.Cert.Domain, "example.com")
+		t.Fatal("child with cert_mode should not inherit auto_tls")
 	}
 }
 
 func TestInheritFrom_AutoTLSInheritedWhenChildHasNoCertConfig(t *testing.T) {
-	parent := &Config{Cert: CertConfig{AutoTLS: true, Domain: "example.com"}}
+	parent := &Config{Cert: CertConfig{AutoTLS: true, Domain: "a.example.com"}}
 	child := &Config{}
 	child.inheritFrom(parent)
 	if !child.Cert.AutoTLS {
-		t.Error("auto_tls should be inherited when child has no cert config")
+		t.Fatal("child without cert config should inherit auto_tls")
+	}
+}
+
+func TestLoad_EnvMachineOverrides(t *testing.T) {
+	path := writeTemp(t, `
+panel:
+  url: "https://panel.example.com"
+`)
+	t.Setenv("MACHINE_ID", "7")
+	t.Setenv("MACHINE_TOKEN", "env-token")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Machine == nil || cfg.Machine.MachineID != 7 {
+		t.Fatalf("machine_id from env: %+v", cfg.Machine)
+	}
+	if cfg.Machine.Token != "env-token" {
+		t.Errorf("token from env: %q", cfg.Machine.Token)
 	}
 }
