@@ -145,9 +145,22 @@ func (t *Tracker) Process(
 		t.aliveIPsDirty.Store(true)
 	}
 
+	// Reuse previous traffic snapshot when pending is empty to avoid a
+	// map allocation every track tick (default 10s).
+	var trafficSnap map[int][2]int64
+	if len(t.pendingTraffic) == 0 {
+		if len(prev.traffic) == 0 {
+			trafficSnap = prev.traffic
+		} else {
+			trafficSnap = make(map[int][2]int64)
+		}
+	} else {
+		trafficSnap = copyTrafficMap(t.pendingTraffic)
+	}
+
 	// Publish new snapshot (readers will see this atomically).
 	t.live.Store(&snapshot{
-		traffic:   copyTrafficMap(t.pendingTraffic),
+		traffic:   trafficSnap,
 		aliveIPs:  kernelAliveIPs, // kernel provides fresh copy each tick
 		online:    online,
 		connCount: connCount,

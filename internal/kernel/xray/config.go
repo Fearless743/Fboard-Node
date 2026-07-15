@@ -61,11 +61,23 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 		outbounds = append(outbounds, M{"protocol": "blackhole", "tag": "block"})
 	}
 
+	// Per-connection pipe buffer (KiB). Xray defaults to 512 KiB on amd64, which
+	// is far larger than needed for proxy traffic and inflates RSS under many
+	// concurrent connections. 16 KiB still absorbs a typical TLS/application
+	// record while keeping the ceiling low. Operators can raise it via
+	// kernel.buffer_size or a custom policy.levels.0.bufferSize override.
+	bufferSizeKiB := kcfg.BufferSize
+	if bufferSizeKiB <= 0 {
+		bufferSizeKiB = 16
+	}
+
 	cfg := M{
 		"log": M{
 			"loglevel": xrayLogLevel(kcfg.LogLevel),
-			"error":    "",
-			"access":   "",
+			// "none" is required: empty string means Console in xray's conf
+			// builder, which floods access logs under high concurrency and
+			// inflates RSS / steals CPU from the data path.
+			"access": "none",
 		},
 		"stats": M{},
 		"policy": M{
@@ -73,13 +85,25 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 				"0": M{
 					"statsUserUplink":   true,
 					"statsUserDownlink": true,
+					// Cap internal uplink/downlink pipes. The value is KiB
+					// (xray multiplies by 1024 when building policy).
+					"bufferSize": bufferSizeKiB,
+					// Fail slow handshakes sooner so half-open conns release
+					// their buffers/goroutines instead of sitting for 60s.
+					"handshake": 8,
+					// Idle timeout (seconds). Default xray is 300s; keep a
+					// moderate value so abandoned sockets free memory.
+					"connIdle": 180,
 				},
 			},
+			// System-level inbound/outbound counters are unused by the panel
+			// (we only read per-user stats). Disabling them avoids wrapping
+			// every connection in an extra CounterConnection.
 			"system": M{
-				"statsInboundUplink":    true,
-				"statsInboundDownlink":  true,
-				"statsOutboundUplink":   true,
-				"statsOutboundDownlink": true,
+				"statsInboundUplink":    false,
+				"statsInboundDownlink":  false,
+				"statsOutboundUplink":   false,
+				"statsOutboundDownlink": false,
 			},
 		},
 		"outbounds": outbounds,
@@ -161,8 +185,16 @@ func mergeCustomXray(cfg M, kcfg config.KernelConfig) {
 		}
 	}
 
-	// other top-level keys (policy, api, transport, etc.) — custom overrides,
-	// but we protect auto-generated inbounds, stats, log, routing, outbounds
+	// policy — deep-merge so operators can raise bufferSize / timeouts without
+	// losing the auto-generated statsUser* flags.
+	if customPolicy, ok := custom["policy"]; ok {
+		if customPolicyMap, ok := toAnyMap(customPolicy); ok {
+			mergeCustomXrayPolicy(cfg, customPolicyMap)
+		}
+	}
+
+	// other top-level keys (api, transport, etc.) — custom overrides,
+	// but we protect auto-generated inbounds, stats, log, routing, outbounds, policy
 	protected := map[string]bool{
 		"inbounds": true, "outbounds": true, "routing": true,
 		"dns": true, "log": true, "stats": true, "policy": true,
@@ -172,6 +204,68 @@ func mergeCustomXray(cfg M, kcfg config.KernelConfig) {
 			cfg[k] = v
 		}
 	}
+}
+
+// mergeCustomXrayPolicy deep-merges a custom policy block into the generated
+// one. levels and system are merged key-by-key so a partial override (e.g.
+// only bufferSize) does not wipe statsUserUplink / statsUserDownlink.
+func mergeCustomXrayPolicy(cfg M, customPolicy map[string]any) {
+	policy, ok := cfg["policy"].(M)
+	if !ok {
+		policy = M{}
+		cfg["policy"] = policy
+	}
+
+	if customLevels, ok := toAnyMap(customPolicy["levels"]); ok {
+		levels, _ := policy["levels"].(M)
+		if levels == nil {
+			levels = M{}
+			policy["levels"] = levels
+		}
+		for levelKey, levelVal := range customLevels {
+			customLevel, ok := toAnyMap(levelVal)
+			if !ok {
+				levels[levelKey] = levelVal
+				continue
+			}
+			existing, _ := levels[levelKey].(M)
+			if existing == nil {
+				existing = M{}
+			}
+			for k, v := range customLevel {
+				existing[k] = v
+			}
+			levels[levelKey] = existing
+		}
+	}
+
+	if customSystem, ok := toAnyMap(customPolicy["system"]); ok {
+		system, _ := policy["system"].(M)
+		if system == nil {
+			system = M{}
+		}
+		for k, v := range customSystem {
+			system[k] = v
+		}
+		policy["system"] = system
+	}
+
+	for k, v := range customPolicy {
+		if k == "levels" || k == "system" {
+			continue
+		}
+		policy[k] = v
+	}
+}
+
+// toAnyMap normalises map values that may arrive from JSON/YAML unmarshalling
+// of custom configs. M is an alias of map[string]interface{}, so a single case
+// covers both.
+func toAnyMap(v any) (map[string]any, bool) {
+	if m, ok := v.(map[string]any); ok {
+		return m, true
+	}
+	return nil, false
 }
 
 func mergeCustomXrayRouting(cfg M, customRouting map[string]any) {

@@ -54,17 +54,18 @@ type MachineConfig struct {
 // Example (config.yml):
 //
 //	runtime:
-//	  gomemlimit: "30MiB"   # soft RSS cap; GC becomes more aggressive above this
-//	  gogc: 50              # halve GC target → lower peak RSS, slightly more CPU
+//	  gomemlimit: "512MiB"  # soft RSS cap; GC becomes more aggressive above this
+//	  gogc: 50              # lower GC target → lower peak RSS, slightly more CPU
 type RuntimeConfig struct {
 	// GoMemLimit is a human-readable soft memory limit passed to runtime/debug.SetMemoryLimit.
 	// Valid suffixes: B, KiB, MiB, GiB, TiB.  Empty = no limit (default).
 	// Recommended starting point: set to ~80% of the machine's available RAM.
 	GoMemLimit string `yaml:"gomemlimit"`
 
-	// GoGCPercent overrides GOGC (default 100).
-	// Lower values (e.g. 50) trigger GC more often → lower memory, slightly higher CPU.
-	// 0 means "use the default (100)".
+	// GoGCPercent overrides GOGC. Default is 50 (more aggressive than Go's
+	// built-in 100) so idle heap is reclaimed sooner under connection churn.
+	// Set to 100 for stock Go behaviour, or lower (e.g. 25) on tight RAM.
+	// Use a negative sentinel is not supported; 0 means "apply the default".
 	GoGCPercent int `yaml:"gogc"`
 }
 
@@ -113,6 +114,14 @@ type KernelConfig struct {
 	// You only need to set this if your geo database files live somewhere
 	// other than config_dir.
 	GeoDataDir string `yaml:"geo_data_dir"`
+
+	// BufferSize is the per-connection internal pipe buffer in KiB, written
+	// into xray policy.levels.0.bufferSize. Default 16. Xray's own default
+	// (when unset) is 512 KiB on amd64, which wastes RSS under high concurrency.
+	// Raise this for high-throughput single connections (e.g. 64–128); set
+	// higher only if you observe backpressure under large transfers.
+	// 0 = use the built-in default (16).
+	BufferSize int `yaml:"buffer_size"`
 
 	// CustomOutbound adds outbound entries to the generated xray config.
 	// Each item is a raw xray-native outbound object.
@@ -524,6 +533,9 @@ func (c *Config) inheritFrom(parent *Config) {
 	if len(c.Kernel.CustomRoute) == 0 {
 		c.Kernel.CustomRoute = parent.Kernel.CustomRoute
 	}
+	if c.Kernel.BufferSize == 0 {
+		c.Kernel.BufferSize = parent.Kernel.BufferSize
+	}
 	// Cert (NOT cert_dir — derived from config_dir later)
 	if c.Cert.CertMode == "" {
 		c.Cert.CertMode = parent.Cert.CertMode
@@ -609,6 +621,14 @@ func (c *Config) setDefaultsFrom(baseDir string) {
 	}
 	if c.Node.DeviceReportInterval == 0 {
 		c.Node.DeviceReportInterval = 30
+	}
+	// Runtime defaults — favour lower RSS under connection churn.
+	// Operators who prefer stock Go GC can set runtime.gogc: 100.
+	if c.Runtime.GoGCPercent == 0 {
+		c.Runtime.GoGCPercent = 50
+	}
+	if c.Kernel.BufferSize == 0 {
+		c.Kernel.BufferSize = 16
 	}
 }
 

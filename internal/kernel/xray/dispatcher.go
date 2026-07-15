@@ -156,19 +156,17 @@ func (d *LimitDispatcher) identifyAndCheck(ctx context.Context, dest net.Destina
 // trackLink records connection lifecycle without mutating xray-core owned
 // transport primitives. This keeps mux/XUDP compatible while still allowing
 // the dispatcher to release device-limit state when the link closes.
+//
+// Fields are stored on the wrapper instead of a capturing closure so each
+// connection only pays for one small object allocation (not object + func).
 func (d *LimitDispatcher) trackLink(link *transport.Link, email, sourceIP string, isTCP bool) {
 	d.connCount.Add(1)
-
-	onClose := func() {
-		if isTCP {
-			d.delConn(email, sourceIP)
-		}
-		d.connCount.Add(-1)
-	}
-
 	link.Writer = &closeTrackingWriter{
-		Writer:  link.Writer,
-		onClose: onClose,
+		Writer:     link.Writer,
+		dispatcher: d,
+		email:      email,
+		sourceIP:   sourceIP,
+		isTCP:      isTCP,
 	}
 }
 
@@ -216,30 +214,30 @@ func (d *LimitDispatcher) ResetConns() {
 
 // GetConnectionState returns dispatcher-tracked alive IPs and connection count.
 // Traffic bytes are intentionally left to xray's built-in stats pipeline.
+//
+// The returned maps are owned by the caller. Empty result is a non-nil empty
+// map so trackers can distinguish "no online users" from "not running".
 func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool, connCount int) {
 	d.mu.RLock()
 	emailToUID := d.emailToUID
-	limitedIPs := d.limitedIPs
-	d.mu.RUnlock()
+	aliveIPs = make(map[int]map[string]bool, len(d.limitedIPs))
 
-	aliveIPs = make(map[int]map[string]bool)
-
-	// Collect IPs from limited users (under RLock snapshot).
-	for email, ipsMap := range limitedIPs {
+	// Collect IPs from limited users while holding RLock so the nested
+	// maps are not mutated by delConn mid-iteration.
+	for email, ipsMap := range d.limitedIPs {
 		uid := emailToUID[email]
-		if uid == 0 {
+		if uid == 0 || len(ipsMap) == 0 {
 			continue
 		}
 		ipSet := make(map[string]bool, len(ipsMap))
 		for ip := range ipsMap {
 			ipSet[ip] = true
 		}
-		if len(ipSet) > 0 {
-			aliveIPs[uid] = ipSet
-		}
+		aliveIPs[uid] = ipSet
 	}
+	d.mu.RUnlock()
 
-	// Collect IPs from unlimited users (lock-free).
+	// Collect IPs from unlimited users (lock-free sync.Map).
 	d.unlimitedIPs.Range(func(key, value interface{}) bool {
 		email := key.(string)
 		uid := emailToUID[email]
@@ -248,7 +246,6 @@ func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool
 		}
 		ic := value.(*ipCounter)
 		if ips := ic.aliveIPs(); len(ips) > 0 {
-			// Merge with limited IPs if any
 			if existing, ok := aliveIPs[uid]; ok {
 				for ip := range ips {
 					existing[ip] = true
@@ -392,22 +389,33 @@ func (d *LimitDispatcher) delConn(email, sourceIP string) {
 	}
 }
 
+// closeTrackingWriter wraps a link writer so we observe Close/Interrupt and
+// release device-limit state without a capturing closure.
 type closeTrackingWriter struct {
 	buf.Writer
-	onClose func()
-	closed  atomic.Bool
+	dispatcher *LimitDispatcher
+	email      string
+	sourceIP   string
+	isTCP      bool
+	closed     atomic.Bool
+}
+
+func (w *closeTrackingWriter) onClose() {
+	if !w.closed.CompareAndSwap(false, true) {
+		return
+	}
+	if w.isTCP {
+		w.dispatcher.delConn(w.email, w.sourceIP)
+	}
+	w.dispatcher.connCount.Add(-1)
 }
 
 func (w *closeTrackingWriter) Close() error {
-	if w.closed.CompareAndSwap(false, true) {
-		w.onClose()
-	}
+	w.onClose()
 	return common.Close(w.Writer)
 }
 
 func (w *closeTrackingWriter) Interrupt() {
-	if w.closed.CompareAndSwap(false, true) {
-		w.onClose()
-	}
+	w.onClose()
 	common.Interrupt(w.Writer)
 }
