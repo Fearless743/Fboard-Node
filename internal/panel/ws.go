@@ -24,6 +24,8 @@ const (
 	WSEventReportDevices = "report.devices" // node → panel: report device snapshot
 	WSEventSyncUpgrade   = "sync.upgrade"   // panel → node: upgrade binary
 	WSEventSyncRestart   = "sync.restart"   // panel → node: restart process
+	WSEventSyncLogs      = "sync.logs"      // panel → machine: request recent logs
+	WSEventReportLogs    = "report.logs"    // machine → panel: reply with recent logs
 )
 
 // WSEvent is a parsed data event delivered to the service layer.
@@ -40,6 +42,10 @@ type WSEvent struct {
 
 	// Machine node discovery fields (for sync.nodes)
 	Nodes []MachineNode
+
+	// Log pull request (for sync.logs)
+	LogLimit int
+	LogReqID string
 }
 
 // WSStatusChange notifies the service when WS connectivity changes.
@@ -98,6 +104,18 @@ type syncRestartPayload struct {
 // syncNodesPayload carries the updated node list for a machine.
 type syncNodesPayload struct {
 	Nodes []MachineNode `json:"nodes"`
+}
+
+// syncLogsPayload is a panel request for recent process logs.
+type syncLogsPayload struct {
+	Limit int    `json:"limit,omitempty"`
+	ReqID string `json:"req_id,omitempty"`
+}
+
+// reportLogsPayload is the machine reply carrying recent plain log lines.
+type reportLogsPayload struct {
+	Lines []string `json:"lines"`
+	ReqID string   `json:"req_id,omitempty"`
 }
 
 // WSClientConfig holds WebSocket client tuning options.
@@ -368,6 +386,9 @@ func (w *WSClient) handleMessage(msg wsMessage) {
 	case WSEventSyncRestart:
 		w.handleDataEvent(msg)
 
+	case WSEventSyncLogs:
+		w.handleDataEvent(msg)
+
 	default:
 		nlog.Core().Debug("ws unknown event", "event", msg.Event)
 	}
@@ -474,6 +495,18 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 			return
 		}
 		_ = p
+
+	case WSEventSyncLogs:
+		nlog.Core().Debug("ws sync logs event received")
+		var p syncLogsPayload
+		if len(msg.Data) > 0 {
+			if err := decodeData(msg.Data, &p); err != nil {
+				nlog.Core().Warn("ws: cannot decode logs payload", "error", err)
+				return
+			}
+		}
+		event.LogLimit = p.Limit
+		event.LogReqID = p.ReqID
 	}
 
 	w.onEvent(event)
@@ -552,5 +585,27 @@ func (w *WSClient) SendRaw(event string, data json.RawMessage) {
 	case w.writeCh <- msg:
 	default:
 		nlog.Core().Warn("ws write channel full, skipping raw message", "event", event)
+	}
+}
+
+// SendReportLogs replies to a sync.logs request with recent plain log lines.
+func (w *WSClient) SendReportLogs(lines []string, reqID string) {
+	if !w.connected.Load() {
+		return
+	}
+	payload := reportLogsPayload{Lines: lines, ReqID: reqID}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	msg := wsMessage{
+		Event:     WSEventReportLogs,
+		Data:      data,
+		Timestamp: time.Now().Unix(),
+	}
+	select {
+	case w.writeCh <- msg:
+	default:
+		nlog.Core().Warn("ws write channel full, skipping log report")
 	}
 }

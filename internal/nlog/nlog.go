@@ -22,10 +22,20 @@ const (
 	ColorBlue   = "\033[34m" // core 前缀
 )
 
-// NodeLog provides structured logging with node context.
+// NodeLog provides structured logging with node/machine context.
 // Format: LEVEL [protocol:port] message
+//
+// machineID scopes the in-memory ring used for remote log pull. 0 means
+// process-wide logs (not returned when a specific machine requests logs).
 type NodeLog struct {
-	prefix string // e.g., "shadowsocks:10005" or "trojan:10033"
+	prefix    string // e.g., "shadowsocks:10005" or "core"
+	machineID int
+}
+
+type logRing struct {
+	lines []string
+	next  int
+	full  bool
 }
 
 // Global logger state
@@ -33,10 +43,15 @@ var (
 	mu          sync.RWMutex
 	nodeLoggers = make(map[string]*NodeLog)
 
-	logMu      sync.RWMutex
-	logWriter  io.Writer = os.Stdout
-	logMin     = slog.LevelInfo
-	logColor   = true
+	logMu     sync.RWMutex
+	logWriter io.Writer = os.Stdout
+	logMin              = slog.LevelInfo
+	logColor            = true
+
+	// Per-machine in-memory rings (machineID → ring). machineID 0 is process-wide.
+	ringMu   sync.Mutex
+	rings    = make(map[int]*logRing)
+	ringSize = 1000
 )
 
 // Init configures process-wide log output (called from config.InitLogger).
@@ -70,31 +85,37 @@ func formatMsg(msg string, args []any) string {
 	return b.String()
 }
 
-// ForNode returns a NodeLog for the given protocol and port.
+// ForNode returns a process-scoped NodeLog for the given protocol and port.
+// Prefer ForNodeOn when the caller belongs to a machine instance.
 func ForNode(protocol string, port int) *NodeLog {
-	key := fmt.Sprintf("%s:%d", normalizeProto(protocol), port)
-	mu.RLock()
-	if nl, ok := nodeLoggers[key]; ok {
-		mu.RUnlock()
-		return nl
-	}
-	mu.RUnlock()
-
-	mu.Lock()
-	defer mu.Unlock()
-	// Double check
-	if nl, ok := nodeLoggers[key]; ok {
-		return nl
-	}
-	nl := &NodeLog{prefix: key}
-	nodeLoggers[key] = nl
-	return nl
+	return ForNodeOn(0, protocol, port)
 }
 
-// Core returns a NodeLog for core/system messages.
+// ForNodeOn returns a NodeLog tagged with machineID for ring isolation.
+func ForNodeOn(machineID int, protocol string, port int) *NodeLog {
+	prefix := fmt.Sprintf("%s:%d", normalizeProto(protocol), port)
+	key := fmt.Sprintf("m%d:%s", machineID, prefix)
+	return getLogger(key, prefix, machineID)
+}
+
+// ForMachine returns a core-style logger scoped to one machine instance.
+// Logs go into that machine's ring and are returned by Recent(machineID, n).
+func ForMachine(machineID int) *NodeLog {
+	if machineID <= 0 {
+		return Core()
+	}
+	key := fmt.Sprintf("m%d:core", machineID)
+	return getLogger(key, "core", machineID)
+}
+
+// Core returns a process-wide NodeLog (machineID=0). Not mixed into machine pulls.
 func Core() *NodeLog {
+	return getLogger("core", "core", 0)
+}
+
+func getLogger(key, prefix string, machineID int) *NodeLog {
 	mu.RLock()
-	if nl, ok := nodeLoggers["core"]; ok {
+	if nl, ok := nodeLoggers[key]; ok {
 		mu.RUnlock()
 		return nl
 	}
@@ -102,11 +123,11 @@ func Core() *NodeLog {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if nl, ok := nodeLoggers["core"]; ok {
+	if nl, ok := nodeLoggers[key]; ok {
 		return nl
 	}
-	nl := &NodeLog{prefix: "core"}
-	nodeLoggers["core"] = nl
+	nl := &NodeLog{prefix: prefix, machineID: machineID}
+	nodeLoggers[key] = nl
 	return nl
 }
 
@@ -129,10 +150,10 @@ func normalizeProto(p string) string {
 		return "anytls"
 	case "naive":
 		return "naive"
-		case "mieru":
-			return "mieru"
-		case "sudoku":
-			return "sudoku"
+	case "mieru":
+		return "mieru"
+	case "sudoku":
+		return "sudoku"
 	case "http":
 		return "http"
 	case "socks":
@@ -145,24 +166,24 @@ func normalizeProto(p string) string {
 // ─── Logging Methods ────────────────────────────────────────────────────────
 
 func (nl *NodeLog) Debug(msg string, args ...any) {
-	logWithColor(slog.LevelDebug, nl.prefix, msg, args...)
+	logWithColor(slog.LevelDebug, nl.machineID, nl.prefix, msg, args...)
 }
 
 func (nl *NodeLog) Info(msg string, args ...any) {
-	logWithColor(slog.LevelInfo, nl.prefix, msg, args...)
+	logWithColor(slog.LevelInfo, nl.machineID, nl.prefix, msg, args...)
 }
 
 func (nl *NodeLog) Warn(msg string, args ...any) {
-	logWithColor(slog.LevelWarn, nl.prefix, msg, args...)
+	logWithColor(slog.LevelWarn, nl.machineID, nl.prefix, msg, args...)
 }
 
 func (nl *NodeLog) Error(msg string, args ...any) {
-	logWithColor(slog.LevelError, nl.prefix, msg, args...)
+	logWithColor(slog.LevelError, nl.machineID, nl.prefix, msg, args...)
 }
 
 // logWithColor writes one line to the configured writer (see Init).
 // Format: HH:MM:SS.mmm LEVEL [prefix] message [key=value ...]
-func logWithColor(level slog.Level, prefix, msg string, args ...any) {
+func logWithColor(level slog.Level, machineID int, prefix, msg string, args ...any) {
 	logMu.RLock()
 	out := logWriter
 	min := logMin
@@ -190,8 +211,12 @@ func logWithColor(level slog.Level, prefix, msg string, args ...any) {
 		levelStr = "?????"
 	}
 
+	// Colorless copy into the machine-scoped ring for remote log pull.
+	plain := fmt.Sprintf("%s %s [%s] %s", now, strings.TrimSpace(levelStr), prefix, fullMsg)
+	appendRing(machineID, plain)
+
 	if !color {
-		fmt.Fprintf(out, "%s %s [%s] %s\n", now, strings.TrimSpace(levelStr), prefix, fullMsg)
+		fmt.Fprintln(out, plain)
 		return
 	}
 
@@ -222,6 +247,80 @@ func logWithColor(level slog.Level, prefix, msg string, args ...any) {
 	)
 }
 
+// appendRing stores one plain log line into the fixed-size ring for machineID.
+func appendRing(machineID int, line string) {
+	ringMu.Lock()
+	defer ringMu.Unlock()
+	if ringSize <= 0 {
+		return
+	}
+	r := rings[machineID]
+	if r == nil {
+		r = &logRing{lines: make([]string, ringSize)}
+		rings[machineID] = r
+	}
+	if len(r.lines) != ringSize {
+		r.lines = make([]string, ringSize)
+		r.next = 0
+		r.full = false
+	}
+	r.lines[r.next] = line
+	r.next = (r.next + 1) % ringSize
+	if r.next == 0 {
+		r.full = true
+	}
+}
+
+// Recent returns up to n most recent plain log lines for machineID (oldest → newest).
+// n <= 0 uses the full ring capacity. machineID must be the panel machine id;
+// process-wide logs (machineID 0) are never mixed into other machines' results.
+func Recent(machineID, n int) []string {
+	ringMu.Lock()
+	defer ringMu.Unlock()
+
+	r := rings[machineID]
+	if r == nil || len(r.lines) == 0 {
+		return nil
+	}
+
+	var count int
+	if r.full {
+		count = len(r.lines)
+	} else {
+		count = r.next
+	}
+	if count == 0 {
+		return nil
+	}
+	if n <= 0 || n > count {
+		n = count
+	}
+
+	out := make([]string, n)
+	start := r.next - n
+	if start < 0 {
+		start += len(r.lines)
+	}
+	for i := 0; i < n; i++ {
+		out[i] = r.lines[(start+i)%len(r.lines)]
+	}
+	return out
+}
+
+// SetRingSize configures the ring capacity (mainly for tests). Existing rings
+// are discarded. size <= 0 disables the ring.
+func SetRingSize(size int) {
+	ringMu.Lock()
+	defer ringMu.Unlock()
+	if size <= 0 {
+		ringSize = 0
+		rings = make(map[int]*logRing)
+		return
+	}
+	ringSize = size
+	rings = make(map[int]*logRing)
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 // ReportPushed logs a report push event.
@@ -233,4 +332,3 @@ func ReportPushed(users, online int) {
 func TrackerStats(conns, users int) {
 	Core().Debug(fmt.Sprintf("tracker: %d conns, %d users online", conns, users))
 }
-

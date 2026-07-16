@@ -123,6 +123,33 @@ func (b *apiBackoff) onFailure() {
 // NewWithControlPlane creates a Service with an externally-provided
 // ControlPlane. Used by the machine orchestrator to inject a
 // MachinePanelControlPlane with WS mux routing.
+
+func (s *Service) machineID() int {
+	if s.cfg != nil && s.cfg.Machine != nil {
+		return s.cfg.Machine.MachineID
+	}
+	return 0
+}
+
+// log prefers node-scoped logger, else machine-scoped, else process core.
+// Ensures multi-machine instances never share remote-pull rings.
+func (s *Service) log() *nlog.NodeLog {
+	if s.nodeLog != nil {
+		return s.nodeLog
+	}
+	if mid := s.machineID(); mid > 0 {
+		return nlog.ForMachine(mid)
+	}
+	return nlog.Core()
+}
+
+func (s *Service) ensureNodeLog(protocol string, port int) *nlog.NodeLog {
+	if s.nodeLog == nil {
+		s.nodeLog = nlog.ForNodeOn(s.machineID(), protocol, port)
+	}
+	return s.nodeLog
+}
+
 func NewWithControlPlane(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	return newService(cfg, cp)
 }
@@ -200,7 +227,7 @@ func (s *Service) Run(ctx context.Context) error {
 			if s.wsClient != nil && s.wsClient.IsConnected() {
 				continue
 			}
-			nlog.Core().Debug("polling from API (ws not connected)")
+			s.log().Debug("polling from API (ws not connected)")
 			s.pullViaAPIAsync(ctx)
 
 		case result := <-s.pullResults:
@@ -272,14 +299,14 @@ func (s *Service) initialSetup(ctx context.Context) error {
 	s.lastConfigHash = computeConfigHash(bootstrap.Config)
 	s.updateUserState(bootstrap.Users)
 
-	nlog.Core().Info("initial snapshot ready",
+	s.log().Info("initial snapshot ready",
 		"protocol", bootstrap.Config.Protocol,
 		"port", bootstrap.Config.ServerPort,
 		"users", len(bootstrap.Users),
 	)
 
 	if len(bootstrap.Users) == 0 {
-		nlog.Core().Warn("no users, kernel will not start until users are available")
+		s.log().Warn("no users, kernel will not start until users are available")
 		s.markMailboxReadyAndDrain(ctx)
 		return nil
 	}
@@ -301,7 +328,7 @@ func (s *Service) applyRemoteOverrides(ctx context.Context, nc *model.NodeSpec) 
 
 	// Dynamic Log Level (Kernel)
 	if nc.KernelLogLevel != "" && nc.KernelLogLevel != s.cfg.Kernel.LogLevel {
-		nlog.Core().Info("cert: kernel log level override", "old", s.cfg.Kernel.LogLevel, "new", nc.KernelLogLevel)
+		s.log().Info("cert: kernel log level override", "old", s.cfg.Kernel.LogLevel, "new", nc.KernelLogLevel)
 		s.cfg.Kernel.LogLevel = nc.KernelLogLevel
 	}
 
@@ -312,7 +339,7 @@ func (s *Service) applyRemoteOverrides(ctx context.Context, nc *model.NodeSpec) 
 
 	// Legacy fields (deprecated: prefer cert_config)
 	if nc.AutoTLS != s.cfg.Cert.AutoTLS {
-		nlog.Core().Info("cert: auto_tls policy changed (deprecated field)", "new", nc.AutoTLS)
+		s.log().Info("cert: auto_tls policy changed (deprecated field)", "new", nc.AutoTLS)
 		s.cfg.Cert.AutoTLS = nc.AutoTLS
 	}
 	if nc.Domain != "" && nc.Domain != s.cfg.Cert.Domain {
@@ -333,7 +360,7 @@ func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig) 
 
 	changed, err := s.cert.Reconfigure(ctx, cfgCopy)
 	if err != nil {
-		nlog.Core().Error("failed to apply runtime cert config", "mode", cfgCopy.CertMode, "error", err)
+		s.log().Error("failed to apply runtime cert config", "mode", cfgCopy.CertMode, "error", err)
 		return false
 	}
 	s.cfg.Cert = cfgCopy
@@ -342,7 +369,7 @@ func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig) 
 		if s.nodeLog != nil {
 			s.nodeLog.Info(msg)
 		} else {
-			nlog.Core().Info(msg)
+			s.log().Info(msg)
 		}
 	}
 	return changed
@@ -399,7 +426,7 @@ func (s *Service) requestWSResync(ctx context.Context, reason string) {
 	if s.nodeLog != nil {
 		s.nodeLog.Warn("ws state may be stale, scheduling REST reconciliation", "reason", reason)
 	} else {
-		nlog.Core().Warn("ws state may be stale, scheduling REST reconciliation", "reason", reason)
+		s.log().Warn("ws state may be stale, scheduling REST reconciliation", "reason", reason)
 	}
 	s.pullViaAPIAsync(ctx)
 }
@@ -427,7 +454,7 @@ func (s *Service) handleWSStatus(ctx context.Context, status controlplane.Status
 		if s.nodeLog != nil {
 			s.nodeLog.Info("ws connected")
 		} else {
-			nlog.Core().Info("ws connected")
+			s.log().Info("ws connected")
 		}
 		// After reconnect, proactively pull once to ensure we haven't missed
 		// any updates during the disconnection window.
@@ -441,7 +468,7 @@ func (s *Service) handleWSStatus(ctx context.Context, status controlplane.Status
 		if s.nodeLog != nil {
 			s.nodeLog.Info("ws disconnected")
 		} else {
-			nlog.Core().Info("ws disconnected")
+			s.log().Info("ws disconnected")
 		}
 		// Clear global device state on disconnect
 		s.kernel.ClearGlobalDevices()
@@ -461,12 +488,12 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 			return
 		}
 		if err := validateNodeRuntime(s.kernel.Protocols(), event.Config, s.cert.TLSCert()); err != nil {
-			nlog.Core().Warn("ws config validation failed, ignoring update", "error", err)
+			s.log().Warn("ws config validation failed, ignoring update", "error", err)
 			return
 		}
 		// Initialize nodeLog on first config
 		if s.nodeLog == nil {
-			s.nodeLog = nlog.ForNode(event.Config.Protocol, event.Config.ServerPort)
+			s.nodeLog = nlog.ForNodeOn(s.machineID(), event.Config.Protocol, event.Config.ServerPort)
 		}
 		s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(event.Users)))
 		s.metricsMu.Lock()
@@ -510,26 +537,26 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if version == "" {
 			version = "latest"
 		}
-		nlog.Core().Info(fmt.Sprintf("remote upgrade requested, version: %s", version))
+		s.log().Info(fmt.Sprintf("remote upgrade requested, version: %s", version))
 		go func() {
 			cmd := exec.Command("fbctl", "upgrade", "--version", version)
 			if out, err := cmd.CombinedOutput(); err != nil {
-				nlog.Core().Error(fmt.Sprintf("remote upgrade failed: %v, output: %s", err, string(out)))
+				s.log().Error(fmt.Sprintf("remote upgrade failed: %v, output: %s", err, string(out)))
 			} else {
-				nlog.Core().Info(fmt.Sprintf("remote upgrade completed: %s", string(out)))
+				s.log().Info(fmt.Sprintf("remote upgrade completed: %s", string(out)))
 			}
 		}()
 
 	case controlplane.EventSyncRestart:
 		// Remote restart: exit process (systemd will auto-restart)
-		nlog.Core().Info("remote restart requested, shutting down process")
+		s.log().Info("remote restart requested, shutting down process")
 		go func() {
 			time.Sleep(2 * time.Second)
 			s.kernel.Stop()
 			os.Exit(0)
 		}()
 	default:
-		nlog.Core().Debug(fmt.Sprintf("unknown ws event: %v", event.Type))
+		s.log().Debug(fmt.Sprintf("unknown ws event: %v", event.Type))
 	}
 }
 
@@ -540,11 +567,11 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 		return
 	}
 	if !s.pullActive.CompareAndSwap(false, true) {
-		nlog.Core().Debug("pull already in progress, skipping")
+		s.log().Debug("pull already in progress, skipping")
 		return
 	}
 	if s.pullBackoff.shouldSkip() {
-		nlog.Core().Debug("skipping pull due to backoff")
+		s.log().Debug("skipping pull due to backoff")
 		s.pullActive.Store(false)
 		return
 	}
@@ -556,7 +583,7 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 		defer s.pullActive.Store(false)
 		snapshot, err := s.source.Poll(ctx)
 		if err != nil {
-			nlog.Core().Error("poll control plane failed", "error", err)
+			s.log().Error("poll control plane failed", "error", err)
 			s.pullBackoff.onFailure()
 			return
 		}
@@ -588,19 +615,19 @@ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 	configChanged := false
 
 	if result.certChanged {
-		nlog.Core().Info("certificate renewed, kernel restart needed")
+		s.log().Info("certificate renewed, kernel restart needed")
 		configChanged = true
 	}
 
 	if result.config != nil {
 		if err := validateNodeRuntime(s.kernel.Protocols(), result.config, s.cert.TLSCert()); err != nil {
-			nlog.Core().Warn("runtime config validation failed", "error", err)
+			s.log().Warn("runtime config validation failed", "error", err)
 			result.config = nil
 		} else {
 			configChanged = true
 			// Initialize or update node logger
 			if s.nodeLog == nil {
-				s.nodeLog = nlog.ForNode(result.config.Protocol, result.config.ServerPort)
+				s.nodeLog = nlog.ForNodeOn(s.machineID(), result.config.Protocol, result.config.ServerPort)
 			}
 			s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(s.lastUsers)))
 			s.metricsMu.Lock()
@@ -673,7 +700,7 @@ func (s *Service) restoreUserState(users []model.UserSpec, hash string) {
 // records the successfully applied state. Returns false on error.
 func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 	if err := s.kernel.Start(nc, users, s.cert.TLSCert()); err != nil {
-		nlog.Core().Error("failed to start kernel", "error", err)
+		s.log().Error("failed to start kernel", "error", err)
 		return false
 	}
 
@@ -682,7 +709,7 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 
 	// Initialize node logger on first successful start
 	if s.nodeLog == nil {
-		s.nodeLog = nlog.ForNode(nc.Protocol, nc.ServerPort)
+		s.nodeLog = nlog.ForNodeOn(s.machineID(), nc.Protocol, nc.ServerPort)
 	}
 	s.speedTracker.SetLogCallback(func(msg string) {
 		fullMsg := fmt.Sprintf("speedtracker: %s active_limiters=%d", msg, s.speedTracker.LimitedUserCount())
@@ -716,7 +743,7 @@ func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, n
 	prevUsers, prevHash := s.prepareUserState(users)
 	added, removed, err := s.kernel.UpdateUsers(users)
 	if err != nil {
-		nlog.Core().Warn(fmt.Sprintf("UpdateUsers failed, restarting kernel: %v", err))
+		s.log().Warn(fmt.Sprintf("UpdateUsers failed, restarting kernel: %v", err))
 		if !s.startKernel(s.lastConfig, users) {
 			s.restoreUserState(prevUsers, prevHash)
 		}
@@ -759,9 +786,9 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		prevUsers, prevHash := s.prepareUserState(merged)
 		added, err := s.kernel.AddUsers(deltaUsers)
 		if err != nil {
-			nlog.Core().Warn(fmt.Sprintf("AddUsers failed: %v, falling back to UpdateUsers", err))
+			s.log().Warn(fmt.Sprintf("AddUsers failed: %v, falling back to UpdateUsers", err))
 			if _, _, err := s.kernel.UpdateUsers(merged); err != nil {
-				nlog.Core().Error(fmt.Sprintf("UpdateUsers fallback failed: %v", err))
+				s.log().Error(fmt.Sprintf("UpdateUsers fallback failed: %v", err))
 				s.restoreUserState(prevUsers, prevHash)
 				return
 			}
@@ -784,9 +811,9 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		prevUsers, prevHash := s.prepareUserState(filtered)
 		removed, err := s.kernel.RemoveUsers(deltaUsers)
 		if err != nil {
-			nlog.Core().Warn(fmt.Sprintf("RemoveUsers failed: %v, falling back to UpdateUsers", err))
+			s.log().Warn(fmt.Sprintf("RemoveUsers failed: %v, falling back to UpdateUsers", err))
 			if _, _, err := s.kernel.UpdateUsers(filtered); err != nil {
-				nlog.Core().Error(fmt.Sprintf("UpdateUsers fallback failed: %v", err))
+				s.log().Error(fmt.Sprintf("UpdateUsers fallback failed: %v", err))
 				s.restoreUserState(prevUsers, prevHash)
 				return
 			}
@@ -796,7 +823,7 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		}
 
 	default:
-		nlog.Core().Warn(fmt.Sprintf("unknown user delta action: %s", action))
+		s.log().Warn(fmt.Sprintf("unknown user delta action: %s", action))
 	}
 }
 
@@ -865,7 +892,7 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 	// decides whether to hot-swap users, reconstruct inbounds, or restart itself.
 	if configChanged && s.kernel.IsRunning() {
 		if err := s.kernel.Reload(s.lastConfig, s.lastUsers, s.cert.TLSCert()); err != nil {
-			nlog.Core().Warn(fmt.Sprintf("reload failed, restarting: %v", err))
+			s.log().Warn(fmt.Sprintf("reload failed, restarting: %v", err))
 			s.startKernel(s.lastConfig, s.lastUsers)
 		} else {
 			s.appliedState.Config = s.lastConfig
@@ -886,7 +913,7 @@ func (s *Service) trackAndEnforce(ctx context.Context) {
 
 	traffic, aliveIPs, connCount, err := s.kernel.GetUserTraffic(ctx)
 	if err != nil {
-		nlog.Core().Debug("get user traffic failed", "error", err)
+		s.log().Debug("get user traffic failed", "error", err)
 		return
 	}
 
@@ -914,11 +941,11 @@ func (s *Service) pushReportAsync() {
 		return
 	}
 	if !s.pushActive.CompareAndSwap(false, true) {
-		nlog.Core().Debug("push already in progress, skipping")
+		s.log().Debug("push already in progress, skipping")
 		return
 	}
 	if s.pushBackoff.shouldSkip() {
-		nlog.Core().Debug("skipping report due to backoff")
+		s.log().Debug("skipping report due to backoff")
 		s.pushActive.Store(false)
 		return
 	}
@@ -933,7 +960,7 @@ func (s *Service) pushReportAsync() {
 	go func() {
 		defer s.pushActive.Store(false)
 		if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
-			nlog.Core().Warn("failed to push report", "error", err)
+			s.log().Warn("failed to push report", "error", err)
 			if len(traffic) > 0 {
 				s.tracker.RestoreTraffic(traffic)
 			}
@@ -961,7 +988,7 @@ func (s *Service) pushReportSync() {
 	metrics["kernel_status"] = s.kernel.IsRunning()
 
 	if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
-		nlog.Core().Warn("failed to push final report", "error", err)
+		s.log().Warn("failed to push final report", "error", err)
 	}
 }
 
@@ -1089,11 +1116,11 @@ func (s *Service) sendDeviceBatch() {
 	devices := s.tracker.FlushAliveIPs()
 	// FlushAliveIPs returns nil if no changes since last flush
 	if devices == nil {
-		nlog.Core().Debug("device snapshot unchanged, skipping")
+		s.log().Debug("device snapshot unchanged, skipping")
 		return
 	}
 	s.sink.ReportDevices(s.wsClient, devices)
-	nlog.Core().Debug("device snapshot sent", "users", len(devices))
+	s.log().Debug("device snapshot sent", "users", len(devices))
 }
 
 // reportDevices periodically reports device snapshot to panel.
