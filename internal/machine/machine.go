@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/fearless743/fboard-node/internal/controlplane"
 	"github.com/fearless743/fboard-node/internal/monitor"
 	"github.com/fearless743/fboard-node/internal/nlog"
+	"github.com/fearless743/fboard-node/internal/opsutil"
 	"github.com/fearless743/fboard-node/internal/panel"
 	"github.com/fearless743/fboard-node/internal/service"
 )
@@ -376,30 +378,143 @@ func (o *Orchestrator) handleSyncLogs(event panel.WSEvent) {
 	o.ws.SendReportLogs(lines, event.LogReqID)
 }
 
+// resolveFbctl locates the fbctl binary via opsutil (PATH + common install paths).
+// Returns an empty string if no executable candidate is found.
+//
+// Kept as a thin wrapper so existing call-sites don't need to change.
+func resolveFbctl() string { return opsutil.ResolveFbctl() }
+
+// detectInit / isActiveService / restartService thin wrappers over opsutil so
+// call-sites read well. Defaults to the install.sh-canonical service name.
+const fboardServiceName = opsutil.DefaultServiceName
+
+func detectInit() opsutil.InitSystem   { return opsutil.DetectInit(fboardServiceName) }
+func isActiveService(sys opsutil.InitSystem) bool {
+	return opsutil.IsActive(sys, fboardServiceName)
+}
+func restartService(sys opsutil.InitSystem) error {
+	return opsutil.RestartService(sys, fboardServiceName)
+}
+
 // handleRemoteUpgrade runs fbctl upgrade for the whole machine process.
+//
+//   - Resolves fbctl via PATH + known install locations; never silent-fails.
+//   - On success, schedules a service restart under the detected init system
+//     (systemd / openrc / sysvinit / supervisor / launchd) so the new binary
+//     replaces this one. If no manager is registered, falls back to spawning
+//     a detached copy of ourselves and exiting.
+//   - Sends WS ops ack to the panel (best-effort) with `ok`/`failed` + detail.
 func (o *Orchestrator) handleRemoteUpgrade(version string) {
 	if version == "" {
 		version = "latest"
 	}
 	o.log().Info("remote upgrade requested", "version", version)
-	go func() {
-		cmd := exec.Command("fbctl", "upgrade", "--version", version)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			o.log().Error("remote upgrade failed", "error", err, "output", string(out))
-		} else {
-			o.log().Info("remote upgrade completed", "output", string(out))
+
+	ack := func(status, detail string) {
+		if o.ws != nil {
+			o.ws.SendOpAck("upgrade", status, detail)
 		}
+	}
+
+	go func() {
+		fbctl := resolveFbctl()
+		if fbctl == "" {
+			o.log().Error("remote upgrade failed: fbctl not found in PATH or /usr/{local/,}{bin,sbin}/fbctl")
+			ack("failed", "fbctl binary not found on host; install via install.sh or `make install`")
+			return
+		}
+		o.log().Info("remote upgrade invoking fbctl", "path", fbctl, "version", version)
+		out, err := exec.Command(fbctl, "upgrade", "--version", version).CombinedOutput()
+		if err != nil {
+			detail := strings.TrimSpace(string(out))
+			if detail == "" {
+				detail = err.Error()
+			}
+			o.log().Error("remote upgrade failed", "path", fbctl, "error", err, "output", string(out))
+			ack("failed", detail)
+			return
+		}
+		o.log().Info("remote upgrade completed", "path", fbctl, "output", string(out))
+		ack("ok", "")
+		o.triggerServiceRestart("upgrade")
 	}()
 }
 
-// handleRemoteRestart exits the process so systemd (or supervisor) restarts it.
+// handleRemoteRestart asks the detected init system to restart fboard-node,
+// with the same multi-platform fallback strategy as handleRemoteUpgrade.
 func (o *Orchestrator) handleRemoteRestart() {
-	o.log().Info("remote restart requested, shutting down process")
+	o.log().Info("remote restart requested")
+
+	ack := func(status, detail string) {
+		if o.ws != nil {
+			o.ws.SendOpAck("restart", status, detail)
+		}
+	}
+
 	go func() {
-		time.Sleep(2 * time.Second)
+		// Flush the ack BEFORE we trigger any restart, so the panel sees the
+		// outcome before this process exits. triggerServiceRestart may call
+		// os.Exit when falling back to SelfRespawn, in which case the WS
+		// write loop has no time to drain if we ack afterwards.
+		ack("ok", "")
+		o.log().Info("remote restart: ack sent, dispatching")
+		// Give the ack a brief window to be written to the socket before
+		// we tear down this process. 500ms is enough for a small JSON frame.
+		time.Sleep(500 * time.Millisecond)
+		if err := o.triggerServiceRestart("restart"); err != nil {
+			o.log().Error("remote restart dispatch failed", "error", err)
+			// try to flush a failed ack for the panel — best-effort
+			ack("failed", err.Error())
+			time.Sleep(500 * time.Millisecond)
+			o.stopAll()
+			os.Exit(1)
+			return
+		}
+		o.log().Info("remote restart dispatched, exiting old process")
 		o.stopAll()
 		os.Exit(0)
 	}()
+}
+
+// triggerServiceRestart fans out the restart command to whichever init system
+// this host runs. Returns the dispatch error so the calling handler can decide
+// whether to ack.failed. When no manager is present (container / dev shell)
+// OR when the manager refuses (Unit not found / unit not installed), attempts
+// self-respawn + exit as the final fallback so the binary can still cycle
+// under a plain shell, kubelet, dockerd, etc.
+//
+// For `upgrade`, the supervising process is expected to keep running until we
+// exit so that fbctl can finish its own restart sequence if any; we therefore
+// don't os.Exit here.
+func (o *Orchestrator) triggerServiceRestart(op string) error {
+	sys := detectInit()
+	if sys != opsutil.InitNone {
+		if err := restartService(sys); err == nil {
+			o.log().Info("service restart dispatched", "op", op, "init", sys)
+			return nil
+		} else {
+			o.log().Warn("init-based restart failed; will fall back to self-respawn",
+				"op", op, "init", sys, "error", err.Error())
+		}
+	} else {
+		o.log().Warn("no service manager detected; attempting self-respawn", "op", op)
+	}
+
+	argv0, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("self-respawn failed (cannot resolve argv0): %w", err)
+	}
+	if rerr := opsutil.SelfRespawn(argv0, os.Args); rerr != nil {
+		return fmt.Errorf("self-respawn failed: %w", rerr)
+	}
+	o.log().Info("self-respawn dispatched", "op", op)
+	if op == "restart" {
+		o.log().Info("self-respawn dispatched for restart; exiting")
+		time.Sleep(1 * time.Second)
+		o.stopAll()
+		os.Exit(0)
+	}
+	return nil
 }
 
 // onWSStatus broadcasts WS connectivity changes to all registered nodes.
@@ -474,4 +589,14 @@ func (p *machineNodePush) SendDeviceReport(devices map[int][]string) {
 	payload["devices"] = strDevices
 	data, _ := json.Marshal(payload)
 	p.ws.SendRaw(panel.WSEventReportDevices, data)
+}
+
+// SendOpAck forwards a remote-ops ack through the shared machine WS. The
+// node_id is wrapped in for panel-side correlation; safe to call when
+// the underlying WS is nil (drops the event silently).
+func (p *machineNodePush) SendOpAck(op string, status string, detail string) {
+	if p.ws == nil {
+		return
+	}
+	p.ws.SendOpAck(op, status, detail)
 }
