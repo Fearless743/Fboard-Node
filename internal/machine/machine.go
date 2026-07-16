@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -70,6 +72,21 @@ func New(cfg *config.Config) *Orchestrator {
 	}
 }
 
+// log returns a logger scoped to this machine so multi-instance rings never mix.
+func (o *Orchestrator) log() *nlog.NodeLog {
+	if o.cfg != nil && o.cfg.Machine != nil && o.cfg.Machine.MachineID > 0 {
+		return nlog.ForMachine(o.cfg.Machine.MachineID)
+	}
+	return nlog.Core()
+}
+
+func (o *Orchestrator) machineID() int {
+	if o.cfg != nil && o.cfg.Machine != nil {
+		return o.cfg.Machine.MachineID
+	}
+	return 0
+}
+
 // Run is the main loop. It blocks until ctx is cancelled.
 func (o *Orchestrator) Run(ctx context.Context) error {
 	o.runCtx = ctx
@@ -79,7 +96,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	o.applyIntervals(nodesResp.BaseConfig)
-	nlog.Core().Info(fmt.Sprintf("machine %d: discovered %d nodes",
+	o.log().Info(fmt.Sprintf("machine %d: discovered %d nodes",
 		o.cfg.Machine.MachineID, len(nodesResp.Nodes)))
 
 	// Start machine-level WS as early as possible so sync.nodes can reach an
@@ -155,14 +172,14 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	cp := controlplane.NewMachinePanelControlPlane(perNodeClient, nodeCfg.Kernel, push, registerFn)
 	svc := service.NewWithControlPlane(nodeCfg, cp)
 
-	nlog.Core().Info(fmt.Sprintf("machine: starting node %d (%s/%s)",
+	o.log().Info(fmt.Sprintf("machine: starting node %d (%s/%s)",
 		mn.ID, mn.Type, mn.Name))
 
 	go func() {
 		defer close(done)
 		defer o.unregisterNode(mn.ID)
 		if err := svc.Run(nodeCtx); err != nil {
-			nlog.Core().Error("machine node exited with error",
+			o.log().Error("machine node exited with error",
 				"node_id", mn.ID, "error", err)
 		}
 	}()
@@ -182,7 +199,7 @@ func (o *Orchestrator) stopNode(nodeID int) {
 	delete(o.mailboxes, nodeID)
 	o.eventsMu.Unlock()
 
-	nlog.Core().Info(fmt.Sprintf("machine: stopping node %d", nodeID))
+	o.log().Info(fmt.Sprintf("machine: stopping node %d", nodeID))
 	h.cancel()
 	<-h.done
 }
@@ -196,7 +213,7 @@ func (o *Orchestrator) stopAll() {
 	o.mu.Unlock()
 
 	for id, h := range handles {
-		nlog.Core().Info(fmt.Sprintf("machine: stopping node %d", id))
+		o.log().Info(fmt.Sprintf("machine: stopping node %d", id))
 		h.cancel()
 	}
 	for _, h := range handles {
@@ -213,7 +230,7 @@ func (o *Orchestrator) stopAll() {
 func (o *Orchestrator) rediscover(ctx context.Context) {
 	nodesResp, err := o.client.GetMachineNodes()
 	if err != nil {
-		nlog.Core().Warn("machine node discovery failed", "error", err)
+		o.log().Warn("machine node discovery failed", "error", err)
 		return
 	}
 
@@ -251,7 +268,7 @@ func (o *Orchestrator) reportMachineStatus() {
 		[2]uint64{s.DiskTotal, s.DiskUsed},
 		s.NetInSpeed, s.NetOutSpeed,
 	); err != nil {
-		nlog.Core().Warn("machine status report failed", "error", err)
+		o.log().Warn("machine status report failed", "error", err)
 	}
 }
 
@@ -260,11 +277,11 @@ func (o *Orchestrator) reportMachineStatus() {
 func (o *Orchestrator) tryStartWS(ctx context.Context) {
 	hs, err := o.client.Handshake()
 	if err != nil {
-		nlog.Core().Warn("machine ws handshake failed, REST only", "error", err)
+		o.log().Warn("machine ws handshake failed, REST only", "error", err)
 		return
 	}
 	if !hs.WebSocket.Enabled || hs.WebSocket.WSURL == "" {
-		nlog.Core().Info("machine: ws disabled by panel, REST only")
+		o.log().Info("machine: ws disabled by panel, REST only")
 		return
 	}
 
@@ -290,28 +307,40 @@ func (o *Orchestrator) tryStartWS(ctx context.Context) {
 	o.wsCancel = wsCancel
 	go o.ws.Run(wsCtx)
 
-	nlog.Core().Info("machine: ws mux started")
+	o.log().Info("machine: ws mux started")
 }
 
 // onWSEvent routes a WS event to the correct node's channel.
-// sync.nodes is a machine-level event that triggers immediate rediscovery.
+// Machine-level events (sync.nodes / sync.logs / upgrade / restart) are handled here.
 func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
-	// sync.nodes is a machine-level event, not per-node
-	if event.Type == panel.WSEventSyncNodes {
-		nlog.Core().Info("machine received sync.nodes, triggering immediate rediscovery")
+	switch event.Type {
+	case panel.WSEventSyncNodes:
+		o.log().Info("machine received sync.nodes, triggering immediate rediscovery")
 		go o.rediscover(o.runCtx)
+		return
+
+	case panel.WSEventSyncLogs:
+		o.handleSyncLogs(event)
+		return
+
+	case panel.WSEventSyncUpgrade:
+		o.handleRemoteUpgrade(event.DeltaAction)
+		return
+
+	case panel.WSEventSyncRestart:
+		o.handleRemoteRestart()
 		return
 	}
 
 	nodeID := event.NodeID
 	if nodeID == 0 {
-		nlog.Core().Debug("machine ws event missing node_id, dropping", "type", event.Type)
+		o.log().Debug("machine ws event missing node_id, dropping", "type", event.Type)
 		return
 	}
 
 	translated, err := controlplane.TranslateWSEvent(event, o.cfg.Kernel)
 	if err != nil {
-		nlog.Core().Warn("machine ws event translation failed",
+		o.log().Warn("machine ws event translation failed",
 			"type", event.Type, "node_id", nodeID, "error", err)
 		return
 	}
@@ -320,10 +349,57 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 	mailbox, ok := o.mailboxes[nodeID]
 	o.eventsMu.RUnlock()
 	if !ok {
-		nlog.Core().Debug("machine ws event for unknown node", "node_id", nodeID, "type", event.Type)
+		o.log().Debug("machine ws event for unknown node", "node_id", nodeID, "type", event.Type)
 		return
 	}
 	mailbox.Apply(translated)
+}
+
+// handleSyncLogs replies to the panel with recent in-memory process logs.
+func (o *Orchestrator) handleSyncLogs(event panel.WSEvent) {
+	if o.ws == nil {
+		o.log().Warn("machine sync.logs requested but ws is nil")
+		return
+	}
+	limit := event.LogLimit
+	if limit <= 0 {
+		limit = 500
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	lines := nlog.Recent(o.machineID(), limit)
+	if lines == nil {
+		lines = []string{}
+	}
+	o.log().Debug("machine replying sync.logs", "machine_id", o.machineID(), "lines", len(lines), "req_id", event.LogReqID)
+	o.ws.SendReportLogs(lines, event.LogReqID)
+}
+
+// handleRemoteUpgrade runs fbctl upgrade for the whole machine process.
+func (o *Orchestrator) handleRemoteUpgrade(version string) {
+	if version == "" {
+		version = "latest"
+	}
+	o.log().Info("remote upgrade requested", "version", version)
+	go func() {
+		cmd := exec.Command("fbctl", "upgrade", "--version", version)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			o.log().Error("remote upgrade failed", "error", err, "output", string(out))
+		} else {
+			o.log().Info("remote upgrade completed", "output", string(out))
+		}
+	}()
+}
+
+// handleRemoteRestart exits the process so systemd (or supervisor) restarts it.
+func (o *Orchestrator) handleRemoteRestart() {
+	o.log().Info("remote restart requested, shutting down process")
+	go func() {
+		time.Sleep(2 * time.Second)
+		o.stopAll()
+		os.Exit(0)
+	}()
 }
 
 // onWSStatus broadcasts WS connectivity changes to all registered nodes.
