@@ -65,6 +65,10 @@ type PushClient interface {
 	Run(ctx context.Context)
 	IsConnected() bool
 	SendDeviceReport(devices map[int][]string)
+	// SendOpAck reports the outcome of a remote-ops request (upgrade/restart).
+	// op ∈ "upgrade" / "restart", status ∈ "ok" / "failed". detail is a short
+	// human-readable reason for failed (or empty for ok).
+	SendOpAck(op string, status string, detail string)
 }
 
 type Source interface {

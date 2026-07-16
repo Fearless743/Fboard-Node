@@ -609,3 +609,37 @@ func (w *WSClient) SendReportLogs(lines []string, reqID string) {
 		nlog.Core().Warn("ws write channel full, skipping log report")
 	}
 }
+
+// SendOpAck reports the outcome of a remote ops request (upgrade/restart)
+// back to the panel. op ∈ "upgrade" / "restart", status ∈ "ok" / "failed",
+// detail carries a short reason string for failed.
+func (w *WSClient) SendOpAck(op string, status string, detail string) {
+	if !w.connected.Load() {
+		nlog.Core().Warn("SendOpAck skipped: ws not connected", "op", op, "status", status)
+		return
+	}
+	if w.writeCh == nil {
+		nlog.Core().Warn("SendOpAck skipped: writeCh is nil", "op", op)
+		return
+	}
+	payload, err := json.Marshal(map[string]any{
+		"op":     op,
+		"status": status,
+		"detail": detail,
+		"ts":     time.Now().Unix(),
+	})
+	if err != nil {
+		return
+	}
+	msg := wsMessage{
+		Event:     "op.ack",
+		Data:      payload,
+		Timestamp: time.Now().Unix(),
+	}
+	select {
+	case w.writeCh <- msg:
+		nlog.Core().Info("op.ack enqueued", "op", op, "status", status, "detail", detail)
+	default:
+		nlog.Core().Warn("ws write channel full, skipping op ack", "op", op)
+	}
+}

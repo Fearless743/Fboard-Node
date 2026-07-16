@@ -26,6 +26,7 @@ import (
 	"github.com/fearless743/fboard-node/internal/model"
 	"github.com/fearless743/fboard-node/internal/monitor"
 	"github.com/fearless743/fboard-node/internal/nlog"
+	"github.com/fearless743/fboard-node/internal/opsutil"
 	"github.com/fearless743/fboard-node/internal/tracker"
 )
 
@@ -148,6 +149,45 @@ func (s *Service) ensureNodeLog(protocol string, port int) *nlog.NodeLog {
 		s.nodeLog = nlog.ForNodeOn(s.machineID(), protocol, port)
 	}
 	return s.nodeLog
+}
+
+// triggerServiceRestart fans the restart command out to whichever init system
+// this host runs (systemd / openrc / sysvinit / supervisor / launchd), with a
+// last-resort self-respawn for hosts without any service manager (containers,
+// dev shells). Mirrors the equivalent helper in internal/machine/machine.go.
+//
+// If the detected init system refuses the restart (e.g. systemd is installed
+// but the fboard-node.service unit was never installed, or the unit name is
+// wrong), we still attempt self-respawn rather than failing outright — the
+// caller is expected to ack based on whether self-respawn succeeded.
+func (s *Service) triggerServiceRestart(op string) error {
+	svcName := opsutil.DefaultServiceName
+	sys := opsutil.DetectInit(svcName)
+	if sys != opsutil.InitNone {
+		if err := opsutil.RestartService(sys, svcName); err == nil {
+			s.log().Info(fmt.Sprintf("service restart dispatched op=%s init=%s", op, sys))
+			return nil
+		} else {
+			s.log().Warn(fmt.Sprintf("init-based restart failed; falling back to self-respawn op=%s init=%s err=%s", op, sys, err.Error()))
+		}
+	} else {
+		s.log().Warn(fmt.Sprintf("no service manager detected; attempting self-respawn op=%s", op))
+	}
+
+	argv0, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("self-respawn failed (cannot resolve argv0): %w", err)
+	}
+	if rerr := opsutil.SelfRespawn(argv0, os.Args); rerr != nil {
+		return fmt.Errorf("self-respawn failed: %w", rerr)
+	}
+	s.log().Info(fmt.Sprintf("self-respawn dispatched op=%s", op))
+	if op == "restart" {
+		time.Sleep(1 * time.Second)
+		s.kernel.Stop()
+		os.Exit(0)
+	}
+	return nil
 }
 
 func NewWithControlPlane(cfg *config.Config, cp controlplane.ControlPlane) *Service {
@@ -532,26 +572,68 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		}
 
 	case controlplane.EventSyncUpgrade:
-		// Remote upgrade: run fbctl upgrade in background
+		// Remote upgrade: run fbctl upgrade in background. fbctl binary is
+		// resolved via opsutil (PATH + install paths); outcome is reported to
+		// the panel via WS op.ack.
 		version := event.DeltaAction
 		if version == "" {
 			version = "latest"
 		}
 		s.log().Info(fmt.Sprintf("remote upgrade requested, version: %s", version))
+
+		ack := func(status, detail string) {
+			if s.wsClient != nil {
+				s.wsClient.SendOpAck("upgrade", status, detail)
+			}
+		}
 		go func() {
-			cmd := exec.Command("fbctl", "upgrade", "--version", version)
-			if out, err := cmd.CombinedOutput(); err != nil {
+			fbctl := opsutil.ResolveFbctl()
+			if fbctl == "" {
+				s.log().Error("remote upgrade failed: fbctl not found in PATH or /usr/{local/,}{bin,sbin}/fbctl")
+				ack("failed", "fbctl binary not found on host; install via install.sh or `make install`")
+				return
+			}
+			out, err := exec.Command(fbctl, "upgrade", "--version", version).CombinedOutput()
+			if err != nil {
+				detail := string(out)
+				if detail == "" {
+					detail = err.Error()
+				}
 				s.log().Error(fmt.Sprintf("remote upgrade failed: %v, output: %s", err, string(out)))
-			} else {
-				s.log().Info(fmt.Sprintf("remote upgrade completed: %s", string(out)))
+				ack("failed", detail)
+				return
+			}
+			s.log().Info(fmt.Sprintf("remote upgrade completed: %s", string(out)))
+			ack("ok", "")
+
+			if rerr := s.triggerServiceRestart("upgrade"); rerr != nil {
+				s.log().Warn(fmt.Sprintf("remote upgrade: service restart not dispatched, error: %v", rerr))
 			}
 		}()
 
 	case controlplane.EventSyncRestart:
-		// Remote restart: exit process (systemd will auto-restart)
-		s.log().Info("remote restart requested, shutting down process")
+		s.log().Info("remote restart requested")
+
+		ack := func(status, detail string) {
+			if s.wsClient != nil {
+				s.wsClient.SendOpAck("restart", status, detail)
+			}
+		}
 		go func() {
-			time.Sleep(2 * time.Second)
+			// Ack first, then dispatch. When triggerServiceRestart falls back
+			// to SelfRespawn it may os.Exit before the WS write loop drains
+			// the ack frame, so we send it before the restart call.
+			ack("ok", "")
+			time.Sleep(500 * time.Millisecond)
+			if rerr := s.triggerServiceRestart("restart"); rerr != nil {
+				s.log().Error(fmt.Sprintf("remote restart dispatch failed: %v", rerr))
+				ack("failed", rerr.Error())
+				time.Sleep(500 * time.Millisecond)
+				s.kernel.Stop()
+				os.Exit(1)
+				return
+			}
+			s.log().Info("remote restart dispatched, exiting old process")
 			s.kernel.Stop()
 			os.Exit(0)
 		}()
