@@ -1,7 +1,13 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 REPO_BASE ?= https://github.com/Fearless743/Fboard-Node/releases
-LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) -X 'main.downloadBase=$(REPO_BASE)'
+LDFLAGS := -s -w \
+	-X main.version=$(VERSION) \
+	-X main.buildTime=$(BUILD_TIME) \
+	-X main.commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
+	-X 'main.downloadBase=$(REPO_BASE)' \
+	-X github.com/fearless743/fboard-node/internal/buildinfo.Version=$(VERSION) \
+	-X github.com/fearless743/fboard-node/internal/buildinfo.BuildTime=$(BUILD_TIME)
 
 .PHONY: build clean test docker install build-linux build-linux-arm64 build-all
 
