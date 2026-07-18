@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fearless743/fboard-node/internal/buildinfo"
 	"github.com/fearless743/fboard-node/internal/config"
 	"github.com/fearless743/fboard-node/internal/controlplane"
 	"github.com/fearless743/fboard-node/internal/monitor"
@@ -269,6 +270,7 @@ func (o *Orchestrator) reportMachineStatus() {
 		[2]uint64{s.SwapTotal, s.SwapUsed},
 		[2]uint64{s.DiskTotal, s.DiskUsed},
 		s.NetInSpeed, s.NetOutSpeed,
+		buildinfo.Version,
 	); err != nil {
 		o.log().Warn("machine status report failed", "error", err)
 	}
