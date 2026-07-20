@@ -733,3 +733,54 @@ func TestBuildSudokuInbound(t *testing.T) {
 		t.Fatalf("clients: %#v", clients)
 	}
 }
+
+func TestNormalizeRealityKey(t *testing.T) {
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = byte(i)
+	}
+	std := base64.StdEncoding.EncodeToString(raw)      // may contain +/ and =
+	url := base64.RawURLEncoding.EncodeToString(raw)   // expected form
+	urlPad := base64.URLEncoding.EncodeToString(raw)   // URL alphabet + padding
+
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"already raw url", url, url},
+		{"standard base64", std, url},
+		{"url with padding", urlPad, url},
+		{"empty", "", ""},
+		{"passthrough garbage", "not-a-key", "not-a-key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeRealityKey(tc.input)
+			if got != tc.want {
+				t.Fatalf("normalizeRealityKey(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildRealitySettings_NormalizesPrivateKey(t *testing.T) {
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = byte(255 - i)
+	}
+	std := base64.StdEncoding.EncodeToString(raw)
+	want := base64.RawURLEncoding.EncodeToString(raw)
+
+	nc := &model.NodeSpec{
+		TLSSettings: map[string]interface{}{
+			"private_key": std,
+			"server_name": "www.example.com",
+			"short_id":    "abcd",
+		},
+	}
+	settings := buildRealitySettings(nc)
+	if got := settings["privateKey"]; got != want {
+		t.Fatalf("privateKey = %q, want %q", got, want)
+	}
+}

@@ -104,6 +104,7 @@ func newTestService(k *fakeKernel) *Service {
 		speedTracker: limiter.NewSpeedTracker(sharedLimiter),
 		cert:         cert.NewManager(config.CertConfig{}),
 	}
+	s.kernelDesired.Store(true)
 	k.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
 	k.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
 	return s
@@ -288,5 +289,69 @@ func TestValidateNodeRuntimeRejectsRealityWithoutServerNameOrDest(t *testing.T) 
 	}
 	if got := err.Error(); got != "reality tls requires tls_settings.server_name or tls_settings.dest" {
 		t.Fatalf("unexpected error: %v", got)
+	}
+}
+
+func TestControlKernelStopPreventsAutoStart(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	s.lastConfig = &model.NodeSpec{Protocol: "vless"}
+	s.updateUserState([]model.UserSpec{{ID: 1, UUID: "u1"}})
+
+	if err := s.ControlKernel("stop"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if k.IsRunning() {
+		t.Fatal("expected kernel stopped")
+	}
+	if s.kernelDesired.Load() {
+		t.Fatal("expected kernelDesired=false after stop")
+	}
+
+	// User sync while stopped must not start kernel.
+	s.applyUserUpdate(context.Background(), []model.UserSpec{{ID: 2, UUID: "u2"}}, "hash")
+	if k.IsRunning() {
+		t.Fatal("kernel should stay stopped after user update")
+	}
+	if k.updateCalls != 0 {
+		t.Fatalf("UpdateUsers calls = %d, want 0", k.updateCalls)
+	}
+	if len(s.lastUsers) != 1 || s.lastUsers[0].UUID != "u2" {
+		t.Fatalf("lastUsers not updated while stopped: %#v", s.lastUsers)
+	}
+}
+
+func TestControlKernelStartAndRestart(t *testing.T) {
+	k := &fakeKernel{}
+	s := newTestService(k)
+	s.lastConfig = &model.NodeSpec{Protocol: "vless"}
+	s.updateUserState([]model.UserSpec{{ID: 1, UUID: "u1"}})
+	s.kernelDesired.Store(false)
+
+	if err := s.ControlKernel("start"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if !k.IsRunning() || k.startCalls != 1 {
+		t.Fatalf("running=%v startCalls=%d", k.IsRunning(), k.startCalls)
+	}
+
+	if err := s.ControlKernel("restart"); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if k.startCalls != 2 {
+		t.Fatalf("restart should force Start, startCalls=%d want 2", k.startCalls)
+	}
+}
+
+func TestControlKernelReloadWhileStoppedByOps(t *testing.T) {
+	k := &fakeKernel{}
+	s := newTestService(k)
+	s.lastConfig = &model.NodeSpec{Protocol: "vless"}
+	s.updateUserState([]model.UserSpec{{ID: 1, UUID: "u1"}})
+	s.kernelDesired.Store(false)
+
+	err := s.ControlKernel("reload")
+	if err == nil {
+		t.Fatal("expected reload error when stopped by ops")
 	}
 }

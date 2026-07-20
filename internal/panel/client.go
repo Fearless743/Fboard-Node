@@ -136,19 +136,18 @@ func (c *Client) Report(traffic map[int][2]int64, alive map[int][]string, online
 		}()
 	}
 
-	if len(online) > 0 {
-		o := onlineMapPool.Get().(map[string]int)
-		for uid, count := range online {
-			o[strconv.Itoa(uid)] = count
-		}
-		payload["online"] = o
-		defer func() {
-			for k := range o {
-				delete(o, k)
-			}
-			onlineMapPool.Put(o)
-		}()
+	// Always include online snapshot (even empty) so the panel can clear stale ONLINE_USER.
+	o := onlineMapPool.Get().(map[string]int)
+	for uid, count := range online {
+		o[strconv.Itoa(uid)] = count
 	}
+	payload["online"] = o
+	defer func() {
+		for k := range o {
+			delete(o, k)
+		}
+		onlineMapPool.Put(o)
+	}()
 
 	status := map[string]interface{}{
 		"cpu":  cpu,
