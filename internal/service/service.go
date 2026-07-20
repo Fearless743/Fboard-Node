@@ -43,6 +43,11 @@ type Service struct {
 	lastConfig *model.NodeSpec
 	lastUsers  []model.UserSpec
 
+	// kernelDesired is the operator-desired kernel state.
+	// true (default) = keep kernel running when config+users allow it;
+	// false = remote stop — ensureRunning / applyChanges must not auto-start.
+	kernelDesired atomic.Bool
+
 	// nodeLog is the logger with node context for this service instance.
 	nodeLog *nlog.NodeLog
 
@@ -203,7 +208,7 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	l := limiter.New()
 	st := limiter.NewSpeedTracker(l)
 
-	return &Service{
+	svc := &Service{
 		cfg:          cfg,
 		source:       cp,
 		sink:         cp,
@@ -216,6 +221,9 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 		wsStatusCh:   make(chan controlplane.StatusChange, 4),
 		pullResults:  make(chan pullResult, 1),
 	}
+	// Default: kernel should run whenever config + users allow it.
+	svc.kernelDesired.Store(true)
+	return svc
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -612,31 +620,16 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		}()
 
 	case controlplane.EventSyncRestart:
-		s.log().Info("remote restart requested")
-
-		ack := func(status, detail string) {
+		// Legacy event: map to kernel restart (process restart is reserved for upgrade).
+		s.log().Info("remote kernel restart requested (legacy sync.restart)")
+		if err := s.ControlKernel("restart"); err != nil {
+			s.log().Error("remote kernel restart failed", "error", err)
 			if s.wsClient != nil {
-				s.wsClient.SendOpAck("restart", status, detail)
+				s.wsClient.SendOpAck("kernel.restart", "failed", err.Error())
 			}
+		} else if s.wsClient != nil {
+			s.wsClient.SendOpAck("kernel.restart", "ok", "")
 		}
-		go func() {
-			// Ack first, then dispatch. When triggerServiceRestart falls back
-			// to SelfRespawn it may os.Exit before the WS write loop drains
-			// the ack frame, so we send it before the restart call.
-			ack("ok", "")
-			time.Sleep(500 * time.Millisecond)
-			if rerr := s.triggerServiceRestart("restart"); rerr != nil {
-				s.log().Error(fmt.Sprintf("remote restart dispatch failed: %v", rerr))
-				ack("failed", rerr.Error())
-				time.Sleep(500 * time.Millisecond)
-				s.kernel.Stop()
-				os.Exit(1)
-				return
-			}
-			s.log().Info("remote restart dispatched, exiting old process")
-			s.kernel.Stop()
-			os.Exit(0)
-		}()
 	default:
 		s.log().Debug(fmt.Sprintf("unknown ws event: %v", event.Type))
 	}
@@ -803,9 +796,13 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 
 // ensureRunning starts the kernel if it is not running and there are users +
 // config available. Returns true if the kernel is running afterwards.
+// Honors kernelDesired: when false (remote stop), never auto-start.
 func (s *Service) ensureRunning() bool {
 	if s.kernel.IsRunning() {
 		return true
+	}
+	if !s.kernelDesired.Load() {
+		return false
 	}
 	if len(s.lastUsers) > 0 && s.lastConfig != nil {
 		return s.startKernel(s.lastConfig, s.lastUsers)
@@ -813,12 +810,122 @@ func (s *Service) ensureRunning() bool {
 	return false
 }
 
+// ControlKernel performs remote kernel lifecycle ops for this node service.
+//
+//	stop:    mark undesired + Stop kernel (survives user/config sync)
+//	start:   mark desired + Start with lastConfig/lastUsers
+//	reload:  Reload (requires desired + known config/users); fails if stopped by ops
+//	restart: mark desired + force Start (rebuild even if hash unchanged)
+func (s *Service) ControlKernel(action string) error {
+	action = strings.ToLower(strings.TrimSpace(action))
+	switch action {
+	case "stop":
+		s.log().Info("remote kernel stop requested")
+		s.kernelDesired.Store(false)
+		s.kernel.Stop()
+		s.appliedState.Config = nil
+		s.appliedState.Users = nil
+		s.log().Info("kernel stopped by remote ops")
+		return nil
+
+	case "start":
+		s.log().Info("remote kernel start requested")
+		s.kernelDesired.Store(true)
+		s.metricsMu.RLock()
+		cfg := s.lastConfig
+		users := s.lastUsers
+		s.metricsMu.RUnlock()
+		if cfg == nil {
+			return fmt.Errorf("no config available to start kernel")
+		}
+		if len(users) == 0 {
+			return fmt.Errorf("no users available to start kernel")
+		}
+		if s.kernel.IsRunning() {
+			s.log().Info("kernel already running")
+			return nil
+		}
+		if !s.startKernel(cfg, users) {
+			return fmt.Errorf("start kernel failed")
+		}
+		s.log().Info("kernel started by remote ops")
+		return nil
+
+	case "reload":
+		s.log().Info("remote kernel reload requested")
+		if !s.kernelDesired.Load() {
+			return fmt.Errorf("kernel is stopped by remote ops; start first")
+		}
+		s.metricsMu.RLock()
+		cfg := s.lastConfig
+		users := s.lastUsers
+		s.metricsMu.RUnlock()
+		if cfg == nil || len(users) == 0 {
+			return fmt.Errorf("no config/users available to reload kernel")
+		}
+		if !s.kernel.IsRunning() {
+			if !s.startKernel(cfg, users) {
+				return fmt.Errorf("start kernel failed during reload")
+			}
+			s.log().Info("kernel started by remote ops (reload while stopped)")
+			return nil
+		}
+		if err := s.kernel.Reload(cfg, users, s.cert.TLSCert()); err != nil {
+			s.log().Warn("reload failed, forcing start", "error", err)
+			if !s.startKernel(cfg, users) {
+				return fmt.Errorf("reload failed and start fallback failed: %w", err)
+			}
+		} else {
+			s.appliedState.Config = cfg
+			s.appliedState.Users = users
+		}
+		s.log().Info("kernel reloaded by remote ops")
+		return nil
+
+	case "restart":
+		s.log().Info("remote kernel restart requested")
+		s.kernelDesired.Store(true)
+		s.metricsMu.RLock()
+		cfg := s.lastConfig
+		users := s.lastUsers
+		s.metricsMu.RUnlock()
+		if cfg == nil {
+			return fmt.Errorf("no config available to restart kernel")
+		}
+		if len(users) == 0 {
+			return fmt.Errorf("no users available to restart kernel")
+		}
+		// Force Start so hash-equal Reload no-op cannot skip the rebuild.
+		if !s.startKernel(cfg, users) {
+			return fmt.Errorf("restart kernel failed")
+		}
+		s.log().Info("kernel restarted by remote ops")
+		return nil
+
+	default:
+		return fmt.Errorf("unknown kernel action %q", action)
+	}
+}
+
 // ─── User update entry points ───────────────────────────────────────────────
 
 // applyUserUpdate replaces the full user set and hot-swaps the kernel.
 // Called from WS sync.users and REST polling.
+// When kernelDesired is false, only user state is updated (kernel stays stopped).
 func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, newHash string) {
+	if !s.kernelDesired.Load() {
+		s.prepareUserState(users)
+		if newHash != "" {
+			s.lastUserHash = newHash
+		}
+		return
+	}
 	if !s.ensureRunning() {
+		// Still record users so a later remote start uses the latest set.
+		s.prepareUserState(users)
+		if newHash != "" {
+			s.lastUserHash = newHash
+		}
 		return
 	}
 
@@ -841,6 +948,7 @@ func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, n
 
 // applyUserDelta applies an incremental user change (add or remove) directly
 // via the kernel's atomic user API. Kernel updates run before updateUserState.
+// When kernelDesired is false, only local user state is updated.
 func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers []model.UserSpec) {
 	switch action {
 	case "add":
@@ -850,7 +958,8 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		}
 		merged := mergeUsers(s.lastUsers, deltaUsers)
 
-		if !s.ensureRunning() {
+		if !s.kernelDesired.Load() || !s.ensureRunning() {
+			s.prepareUserState(merged)
 			return
 		}
 
@@ -886,7 +995,8 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		}
 		filtered := subtractUsers(s.lastUsers, deltaUsers)
 
-		if !s.kernel.IsRunning() {
+		if !s.kernelDesired.Load() || !s.kernel.IsRunning() {
+			s.prepareUserState(filtered)
 			return
 		}
 
@@ -957,6 +1067,7 @@ func subtractUsers(base, delta []model.UserSpec) []model.UserSpec {
 
 // applyChanges applies config changes to the kernel. User-only changes are
 // handled by applyUserUpdate/applyUserDelta directly via the atomic user API.
+// When kernelDesired is false, config is kept in memory but kernel is not started.
 func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged bool) {
 	if !configChanged {
 		return
@@ -967,6 +1078,11 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 			s.kernel.Stop()
 			s.appliedState.Users = nil
 		}
+		return
+	}
+
+	// Remote stop: do not auto-start / reload until operator starts again.
+	if !s.kernelDesired.Load() {
 		return
 	}
 

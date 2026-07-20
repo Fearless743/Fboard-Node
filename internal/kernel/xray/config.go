@@ -782,7 +782,8 @@ func buildRealitySettings(nc *model.NodeSpec) M {
 	}
 
 	if pk, ok := nc.TLSSettings["private_key"]; ok {
-		reality["privateKey"] = pk
+		// Xray 只接受 base64.RawURLEncoding；面板历史数据可能是标准 Base64
+		reality["privateKey"] = normalizeRealityKey(fmt.Sprintf("%v", pk))
 	}
 	if sid, ok := nc.TLSSettings["short_id"]; ok {
 		switch v := sid.(type) {
@@ -1014,6 +1015,35 @@ func extractECHServerKeys(tlsSettings map[string]interface{}) string {
 	return echPEMToBase64(pemData)
 }
 
+
+// normalizeRealityKey re-encodes an X25519 REALITY key as base64.RawURLEncoding
+// (no padding, URL-safe alphabet). Accepts standard Base64, RawStd, RawURL, or
+// URL-with-padding inputs. Unrecognized values are returned unchanged.
+func normalizeRealityKey(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+
+	// Prefer RawURL (what Xray expects)
+	if decoded, err := base64.RawURLEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
+		return base64.RawURLEncoding.EncodeToString(decoded)
+	}
+	// Standard Base64 (with padding, +/)
+	if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
+		return base64.RawURLEncoding.EncodeToString(decoded)
+	}
+	// URL-safe with padding
+	if decoded, err := base64.URLEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
+		return base64.RawURLEncoding.EncodeToString(decoded)
+	}
+	// Raw standard (no padding, +/)
+	if decoded, err := base64.RawStdEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
+		return base64.RawURLEncoding.EncodeToString(decoded)
+	}
+
+	return raw
+}
 
 // normalizeSS2022Key ensures a SS2022 server/user key is valid base64 that
 // decodes to exactly keySize bytes. If the input is already valid base64

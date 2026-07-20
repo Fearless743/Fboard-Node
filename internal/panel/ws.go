@@ -23,7 +23,8 @@ const (
 	WSEventSyncNodes     = "sync.nodes"     // panel → machine: node list changed
 	WSEventReportDevices = "report.devices" // node → panel: report device snapshot
 	WSEventSyncUpgrade   = "sync.upgrade"   // panel → node: upgrade binary
-	WSEventSyncRestart   = "sync.restart"   // panel → node: restart process
+	WSEventSyncRestart   = "sync.restart"   // panel → node: legacy; mapped to kernel restart
+	WSEventSyncKernel    = "sync.kernel"    // panel → machine: kernel stop/start/reload/restart
 	WSEventSyncLogs      = "sync.logs"      // panel → machine: request recent logs
 	WSEventReportLogs    = "report.logs"    // machine → panel: reply with recent logs
 )
@@ -99,6 +100,14 @@ type syncRestartPayload struct {
 	RequestedNodeID int   `json:"requested_node_id"`
 	Timestamp       int64 `json:"timestamp"`
 	NodeID          int   `json:"node_id"`
+}
+
+// syncKernelPayload carries remote kernel lifecycle action for a machine.
+// action ∈ stop|start|reload|restart
+type syncKernelPayload struct {
+	Action    string `json:"action"`
+	Reason    string `json:"reason"`
+	Timestamp int64  `json:"timestamp"`
 }
 
 // syncNodesPayload carries the updated node list for a machine.
@@ -386,6 +395,9 @@ func (w *WSClient) handleMessage(msg wsMessage) {
 	case WSEventSyncRestart:
 		w.handleDataEvent(msg)
 
+	case WSEventSyncKernel:
+		w.handleDataEvent(msg)
+
 	case WSEventSyncLogs:
 		w.handleDataEvent(msg)
 
@@ -488,13 +500,27 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 		event.DeltaAction = p.Version
 
 	case WSEventSyncRestart:
-		nlog.Core().Info("ws remote restart event received")
+		nlog.Core().Info("ws remote restart event received (legacy; mapped to kernel restart)")
 		var p syncRestartPayload
 		if err := decodeData(msg.Data, &p); err != nil {
 			nlog.Core().Warn("ws: cannot decode restart payload", "error", err)
 			return
 		}
+		event.DeltaAction = "restart"
 		_ = p
+
+	case WSEventSyncKernel:
+		nlog.Core().Info("ws remote kernel event received")
+		var p syncKernelPayload
+		if err := decodeData(msg.Data, &p); err != nil {
+			nlog.Core().Warn("ws: cannot decode kernel payload", "error", err)
+			return
+		}
+		if p.Action == "" {
+			nlog.Core().Warn("ws: kernel payload missing action")
+			return
+		}
+		event.DeltaAction = p.Action
 
 	case WSEventSyncLogs:
 		nlog.Core().Debug("ws sync logs event received")
@@ -611,7 +637,7 @@ func (w *WSClient) SendReportLogs(lines []string, reqID string) {
 }
 
 // SendOpAck reports the outcome of a remote ops request (upgrade/restart)
-// back to the panel. op ∈ "upgrade" / "restart", status ∈ "ok" / "failed",
+// back to the panel. op ∈ "upgrade" / "restart" / "kernel.*", status ∈ "ok" / "failed",
 // detail carries a short reason string for failed.
 func (w *WSClient) SendOpAck(op string, status string, detail string) {
 	if !w.connected.Load() {

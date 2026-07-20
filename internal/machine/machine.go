@@ -27,6 +27,7 @@ type nodeHandle struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	mailbox *controlplane.NodeMailbox
+	svc     *service.Service
 }
 
 // Orchestrator manages all nodes bound to a panel machine. It:
@@ -175,6 +176,12 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	cp := controlplane.NewMachinePanelControlPlane(perNodeClient, nodeCfg.Kernel, push, registerFn)
 	svc := service.NewWithControlPlane(nodeCfg, cp)
 
+	o.mu.Lock()
+	if h, ok := o.nodes[mn.ID]; ok {
+		h.svc = svc
+	}
+	o.mu.Unlock()
+
 	o.log().Info(fmt.Sprintf("machine: starting node %d (%s/%s)",
 		mn.ID, mn.Type, mn.Name))
 
@@ -315,7 +322,7 @@ func (o *Orchestrator) tryStartWS(ctx context.Context) {
 }
 
 // onWSEvent routes a WS event to the correct node's channel.
-// Machine-level events (sync.nodes / sync.logs / upgrade / restart) are handled here.
+// Machine-level events (sync.nodes / sync.logs / upgrade / kernel / legacy restart) are handled here.
 func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 	switch event.Type {
 	case panel.WSEventSyncNodes:
@@ -331,8 +338,13 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 		o.handleRemoteUpgrade(event.DeltaAction)
 		return
 
+	case panel.WSEventSyncKernel:
+		o.handleRemoteKernel(event.DeltaAction)
+		return
+
 	case panel.WSEventSyncRestart:
-		o.handleRemoteRestart()
+		// Legacy: process restart removed; map to kernel restart.
+		o.handleRemoteKernel("restart")
 		return
 	}
 
@@ -442,40 +454,70 @@ func (o *Orchestrator) handleRemoteUpgrade(version string) {
 	}()
 }
 
-// handleRemoteRestart asks the detected init system to restart fboard-node,
-// with the same multi-platform fallback strategy as handleRemoteUpgrade.
-func (o *Orchestrator) handleRemoteRestart() {
-	o.log().Info("remote restart requested")
+// handleRemoteKernel fans a kernel lifecycle action out to every node service
+// on this machine. Process/WS stay alive; only the embedded xray kernel is
+// stopped / started / reloaded / force-restarted.
+//
+// action ∈ stop|start|reload|restart
+func (o *Orchestrator) handleRemoteKernel(action string) {
+	action = strings.ToLower(strings.TrimSpace(action))
+	if action == "" {
+		action = "restart"
+	}
+	o.log().Info("remote kernel event received", "action", action)
 
+	op := "kernel." + action
 	ack := func(status, detail string) {
 		if o.ws != nil {
-			o.ws.SendOpAck("restart", status, detail)
+			o.ws.SendOpAck(op, status, detail)
 		}
 	}
 
 	go func() {
-		// Flush the ack BEFORE we trigger any restart, so the panel sees the
-		// outcome before this process exits. triggerServiceRestart may call
-		// os.Exit when falling back to SelfRespawn, in which case the WS
-		// write loop has no time to drain if we ack afterwards.
-		ack("ok", "")
-		o.log().Info("remote restart: ack sent, dispatching")
-		// Give the ack a brief window to be written to the socket before
-		// we tear down this process. 500ms is enough for a small JSON frame.
-		time.Sleep(500 * time.Millisecond)
-		if err := o.triggerServiceRestart("restart"); err != nil {
-			o.log().Error("remote restart dispatch failed", "error", err)
-			// try to flush a failed ack for the panel — best-effort
-			ack("failed", err.Error())
-			time.Sleep(500 * time.Millisecond)
-			o.stopAll()
-			os.Exit(1)
+		okCount, failCount, detail := o.controlAllKernels(action)
+		if failCount == 0 {
+			o.log().Info("remote kernel op completed",
+				"action", action, "ok", okCount)
+			ack("ok", detail)
 			return
 		}
-		o.log().Info("remote restart dispatched, exiting old process")
-		o.stopAll()
-		os.Exit(0)
+		o.log().Error("remote kernel op partially/fully failed",
+			"action", action, "ok", okCount, "failed", failCount, "detail", detail)
+		ack("failed", detail)
 	}()
+}
+
+// controlAllKernels invokes Service.ControlKernel on every running node.
+// Returns counts and a human-readable detail string for op.ack.
+func (o *Orchestrator) controlAllKernels(action string) (okCount, failCount int, detail string) {
+	o.mu.Lock()
+	handles := make(map[int]*nodeHandle, len(o.nodes))
+	for id, h := range o.nodes {
+		handles[id] = h
+	}
+	o.mu.Unlock()
+
+	if len(handles) == 0 {
+		return 0, 0, "no nodes running on this machine"
+	}
+
+	var parts []string
+	for id, h := range handles {
+		if h == nil || h.svc == nil {
+			failCount++
+			parts = append(parts, fmt.Sprintf("node %d: service not ready", id))
+			continue
+		}
+		if err := h.svc.ControlKernel(action); err != nil {
+			failCount++
+			parts = append(parts, fmt.Sprintf("node %d: %v", id, err))
+			continue
+		}
+		okCount++
+		parts = append(parts, fmt.Sprintf("node %d: ok", id))
+	}
+	detail = strings.Join(parts, "; ")
+	return okCount, failCount, detail
 }
 
 // triggerServiceRestart fans out the restart command to whichever init system
