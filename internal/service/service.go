@@ -907,6 +907,12 @@ func (s *Service) ControlKernel(action string) error {
 	}
 }
 
+// KernelState returns whether the embedded kernel is currently running and
+// whether the operator currently desires it to run (false after remote stop).
+func (s *Service) KernelState() (running, desired bool) {
+	return s.kernel.IsRunning(), s.kernelDesired.Load()
+}
+
 // ─── User update entry points ───────────────────────────────────────────────
 
 // applyUserUpdate replaces the full user set and hot-swaps the kernel.

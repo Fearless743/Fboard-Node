@@ -326,7 +326,9 @@ func (c *Client) GetMachineNodes() (*MachineNodesResponse, error) {
 // ReportMachineStatus sends machine-level load metrics to the panel.
 // netIn/netOut are bytes/sec; negative values mean "unavailable" (first sample).
 // version is the fboard-node binary version (empty string is omitted).
-func (c *Client) ReportMachineStatus(cpu float64, mem, swap, disk [2]uint64, netIn, netOut float64, version string) error {
+// kernel may be nil; when set it is attached as the "kernel" object
+// (status / nodes_total / nodes_running / nodes_desired).
+func (c *Client) ReportMachineStatus(cpu float64, mem, swap, disk [2]uint64, netIn, netOut float64, version string, kernel map[string]interface{}) error {
 	payload := map[string]interface{}{
 		"cpu":  cpu,
 		"mem":  map[string]interface{}{"total": mem[0], "used": mem[1]},
@@ -338,6 +340,9 @@ func (c *Client) ReportMachineStatus(cpu float64, mem, swap, disk [2]uint64, net
 	}
 	if version != "" {
 		payload["version"] = version
+	}
+	if kernel != nil {
+		payload["kernel"] = kernel
 	}
 	return c.postJSON("/api/v2/server/machine/status", payload)
 }

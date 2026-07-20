@@ -278,8 +278,62 @@ func (o *Orchestrator) reportMachineStatus() {
 		[2]uint64{s.DiskTotal, s.DiskUsed},
 		s.NetInSpeed, s.NetOutSpeed,
 		buildinfo.Version,
+		o.aggregateKernelStatus(),
 	); err != nil {
 		o.log().Warn("machine status report failed", "error", err)
+	}
+}
+
+// aggregateKernelStatus summarizes embedded-kernel state across all node
+// services on this machine for panel load_status.kernel.
+//
+// status:
+//
+//	idle     — no node services
+//	running  — every node kernel is running
+//	stopped  — no node kernel is running
+//	partial  — mix of running / stopped
+func (o *Orchestrator) aggregateKernelStatus() map[string]interface{} {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	total := 0
+	running := 0
+	desired := 0
+	for _, h := range o.nodes {
+		if h == nil || h.svc == nil {
+			// Service not ready yet — still counts as a hosted node slot
+			// with unknown (non-running) kernel.
+			total++
+			continue
+		}
+		total++
+		r, d := h.svc.KernelState()
+		if r {
+			running++
+		}
+		if d {
+			desired++
+		}
+	}
+
+	status := "idle"
+	switch {
+	case total == 0:
+		status = "idle"
+	case running == total:
+		status = "running"
+	case running == 0:
+		status = "stopped"
+	default:
+		status = "partial"
+	}
+
+	return map[string]interface{}{
+		"status":        status,
+		"nodes_total":   total,
+		"nodes_running": running,
+		"nodes_desired": desired,
 	}
 }
 
@@ -402,7 +456,7 @@ func resolveFbctl() string { return opsutil.ResolveFbctl() }
 // call-sites read well. Defaults to the install.sh-canonical service name.
 const fboardServiceName = opsutil.DefaultServiceName
 
-func detectInit() opsutil.InitSystem   { return opsutil.DetectInit(fboardServiceName) }
+func detectInit() opsutil.InitSystem { return opsutil.DetectInit(fboardServiceName) }
 func isActiveService(sys opsutil.InitSystem) bool {
 	return opsutil.IsActive(sys, fboardServiceName)
 }
@@ -475,6 +529,9 @@ func (o *Orchestrator) handleRemoteKernel(action string) {
 
 	go func() {
 		okCount, failCount, detail := o.controlAllKernels(action)
+		// Push fresh kernel aggregate so the admin UI can refresh button state
+		// without waiting for the next status ticker.
+		o.reportMachineStatus()
 		if failCount == 0 {
 			o.log().Info("remote kernel op completed",
 				"action", action, "ok", okCount)
