@@ -126,6 +126,12 @@ type NodeConfig struct {
 	DownMbps     int    `json:"down_mbps,omitempty"`
 	Obfs         string `json:"obfs,omitempty"`
 	ObfsPassword string `json:"obfs-password,omitempty"`
+	// Realm is a full Hysteria Realms URI, e.g. realm://token@host/name
+	// (optional realm+http://). Empty means ordinary Hy2 listen.
+	Realm string `json:"realm,omitempty"`
+	// RealmInsecure skips TLS verification for the Realms rendezvous
+	// HTTPS client only (not Hy2 TLS allow_insecure).
+	RealmInsecure bool `json:"realm_insecure,omitempty"`
 
 	// TUIC
 	CongestionControl string `json:"congestion_control,omitempty"`

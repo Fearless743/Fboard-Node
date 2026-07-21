@@ -27,6 +27,7 @@ import (
 	"github.com/xtls/xray-core/proxy/vmess"
 	tuicAccount "github.com/xtls/xray-core/proxy/tuic/account"
 	anytlsproxy "github.com/xtls/xray-core/proxy/anytls"
+	hysteriaAccount "github.com/xtls/xray-core/proxy/hysteria/account"
 	naiveAccount "github.com/xtls/xray-core/proxy/naive/account"
 	mieruAccount "github.com/xtls/xray-core/proxy/mieru/account"
 	sudokuproxy "github.com/xtls/xray-core/proxy/sudoku"
@@ -596,6 +597,10 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
 			return nil, fmt.Errorf("parse tuic UUID: %w", err)
 		}
 		mu.Account = &tuicAccount.MemoryAccount{UUID: id, Password: u.UUID}
+
+	case "hysteria":
+		// Hy2 multi-user auth is the panel user UUID (same as inbound clients[].auth).
+		mu.Account = &hysteriaAccount.MemoryAccount{Auth: u.UUID}
 
 	case "anytls":
 		mu.Account = &anytlsproxy.MemoryAccount{Password: u.UUID}

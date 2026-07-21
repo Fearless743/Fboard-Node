@@ -556,12 +556,21 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 	}
 	base["settings"] = M{"clients": clients}
 
+	hySettings := M{
+		"version":        nc.Version,
+		"udpIdleTimeout": 60,
+	}
+	// Hysteria Realms: full URI on hysteriaSettings (not listen address).
+	if realm := strings.TrimSpace(nc.Realm); realm != "" {
+		hySettings["realm"] = realm
+		if nc.RealmInsecure {
+			hySettings["realmInsecure"] = true
+		}
+	}
+
 	ss := M{
-		"network": "hysteria",
-		"hysteriaSettings": M{
-			"version":        nc.Version,
-			"udpIdleTimeout": 60,
-		},
+		"network":          "hysteria",
+		"hysteriaSettings": hySettings,
 	}
 
 	finalMask := M{}
