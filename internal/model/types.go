@@ -36,6 +36,10 @@ type NodeSpec struct {
 	DownMbps     int
 	Obfs         string
 	ObfsPassword string
+	// Realm is a Hysteria Realms URI (realm://token@host/name).
+	Realm string
+	// RealmInsecure skips rendezvous TLS verification only.
+	RealmInsecure bool
 
 	CongestionControl string
 	PaddingScheme     string

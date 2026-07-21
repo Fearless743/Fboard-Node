@@ -784,3 +784,55 @@ func TestBuildRealitySettings_NormalizesPrivateKey(t *testing.T) {
 		t.Fatalf("privateKey = %q, want %q", got, want)
 	}
 }
+
+func TestBuildHysteria_RealmSettings(t *testing.T) {
+	users := []model.UserSpec{{ID: 1, UUID: "user-uuid-1"}}
+	tc := kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")}
+
+	// Ordinary Hy2: no realm keys in hysteriaSettings.
+	plain := &model.NodeSpec{
+		Protocol:   "hysteria",
+		Version:    2,
+		ServerPort: 443,
+		UpMbps:     100,
+		DownMbps:   200,
+	}
+	in := buildInbound(plain, users, tc)
+	if in == nil {
+		t.Fatal("expected hysteria inbound")
+	}
+	ss := in["streamSettings"].(M)
+	hy := ss["hysteriaSettings"].(M)
+	if _, ok := hy["realm"]; ok {
+		t.Fatalf("plain hy2 should not set realm: %#v", hy)
+	}
+	if _, ok := hy["realmInsecure"]; ok {
+		t.Fatalf("plain hy2 should not set realmInsecure: %#v", hy)
+	}
+
+	// Realms: URI + insecure flag written into hysteriaSettings.
+	realmURI := "realm://tok@rendezvous.example/my-node"
+	withRealm := &model.NodeSpec{
+		Protocol:      "hysteria",
+		Version:       2,
+		ServerPort:    443,
+		Realm:         realmURI,
+		RealmInsecure: true,
+	}
+	in = buildInbound(withRealm, users, tc)
+	if in == nil {
+		t.Fatal("expected hysteria realm inbound")
+	}
+	ss = in["streamSettings"].(M)
+	hy = ss["hysteriaSettings"].(M)
+	if hy["realm"] != realmURI {
+		t.Fatalf("realm: got %v want %s", hy["realm"], realmURI)
+	}
+	if hy["realmInsecure"] != true {
+		t.Fatalf("realmInsecure: got %v", hy["realmInsecure"])
+	}
+	clients := in["settings"].(M)["clients"].([]M)
+	if len(clients) != 1 || clients[0]["auth"] != "user-uuid-1" {
+		t.Fatalf("clients auth: %#v", clients)
+	}
+}
