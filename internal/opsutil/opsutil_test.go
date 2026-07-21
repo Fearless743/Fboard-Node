@@ -43,10 +43,22 @@ func TestDetectInit_NoMarkers_ReturnsNone(t *testing.T) {
 	// We can't delete /run/systemd/system or /etc/init.d safely, but for the
 	// "no other indicators" branch we rely on the function's ordering. Probe
 	// the constants directly to ensure the enum members exist.
-	for _, sys := range []InitSystem{InitSystemd, InitOpenRC, InitSysVInit, InitSupervisor, InitLaunchd, InitNone} {
+	for _, sys := range []InitSystem{InitSystemd, InitOpenRC, InitRC, InitSysVInit, InitSupervisor, InitLaunchd, InitNone} {
 		if string(sys) == "" {
 			t.Fatalf("empty enum value: %+v", sys)
 		}
+	}
+}
+
+func TestManagerServiceName_RCUsesUnderscore(t *testing.T) {
+	if got := ManagerServiceName(InitRC, DefaultServiceName); got != RCServiceName {
+		t.Fatalf("InitRC: got %q, want %q", got, RCServiceName)
+	}
+	if got := ManagerServiceName(InitSystemd, DefaultServiceName); got != DefaultServiceName {
+		t.Fatalf("InitSystemd: got %q, want %q", got, DefaultServiceName)
+	}
+	if got := ManagerServiceName(InitOpenRC, ""); got != DefaultServiceName {
+		t.Fatalf("empty svcName fallback: got %q, want %q", got, DefaultServiceName)
 	}
 }
 
@@ -84,7 +96,7 @@ func TestSelfRespawn_DirectoryAsBinaryErrors(t *testing.T) {
 // Smoke: ensure IsActive doesn't crash on any platform; result is allowed
 // to be either true or false.
 func TestIsActive_DoesNotPanic(t *testing.T) {
-	for _, sys := range []InitSystem{InitSystemd, InitOpenRC, InitSysVInit, InitSupervisor, InitLaunchd} {
+	for _, sys := range []InitSystem{InitSystemd, InitOpenRC, InitRC, InitSysVInit, InitSupervisor, InitLaunchd} {
 		_ = IsActive(sys, DefaultServiceName)
 	}
 	_ = IsActive(InitNone, DefaultServiceName) // returns false by contract

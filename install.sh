@@ -16,8 +16,9 @@ CONFIG_FILE="${INSTALL_ROOT}/config.yml"
 CREDENTIALS_FILE="${INSTALL_ROOT}/credentials.env"
 BINARY_PATH="/usr/local/bin/fboard-node"
 SERVICE_NAME="fboard-node"
-SERVICE_PATH=""          # set by detect_init_system
-INIT_SYSTEM=""           # systemd | openrc
+RC_SERVICE_NAME="fboard_node"   # FreeBSD rc.d (no hyphens)
+SERVICE_PATH=""                 # set by detect_init_system
+INIT_SYSTEM=""                  # systemd | openrc | rc
 CLI_PATH="/usr/local/bin/fbctl"
 INSTALLER_COPY_PATH="${INSTALL_ROOT}/install.sh"
 CLI_BINARY_SOURCE=""
@@ -48,6 +49,7 @@ PURGE=0
 YES=0
 ARCH=""
 OS=""
+OS_KERNEL=""                    # linux | freebsd — used in release artifact names
 DOWNLOAD_URL=""
 CURRENT_STATE="fresh"
 TMP_DIR=""
@@ -56,6 +58,7 @@ SERVICE_EXISTED=0
 CLEANUP_DONE=0
 OPENRC_INIT_SCRIPT="/etc/init.d/${SERVICE_NAME}"
 SYSTEMD_SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+FREEBSD_RC_SCRIPT="/usr/local/etc/rc.d/${RC_SERVICE_NAME}"
 
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -122,10 +125,11 @@ rollback_install() {
             rm -f "$CLI_PATH"
         fi
         if [ -f "$BACKUP_PATH/service-file" ]; then
-            if [ "$INIT_SYSTEM" = "openrc" ]; then
-                install -m 755 "$BACKUP_PATH/service-file" "$SERVICE_PATH"
-            else
+            if [ "$INIT_SYSTEM" = "systemd" ]; then
                 install -m 644 "$BACKUP_PATH/service-file" "$SERVICE_PATH"
+            else
+                # openrc + FreeBSD rc scripts are executable
+                install -m 755 "$BACKUP_PATH/service-file" "$SERVICE_PATH"
             fi
         else
             rm -f "$SERVICE_PATH"
@@ -325,15 +329,42 @@ detect_arch() {
 }
 
 detect_os() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        OS="$ID"
+    local uname_s
+    uname_s=$(uname -s 2>/dev/null || echo unknown)
+    case "$uname_s" in
+        FreeBSD)
+            OS="freebsd"
+            OS_KERNEL="freebsd"
+            ;;
+        Linux|*)
+            OS_KERNEL="linux"
+            if [ -f /etc/os-release ]; then
+                # shellcheck disable=SC1091
+                . /etc/os-release
+                OS="${ID:-unknown}"
+            else
+                OS="unknown"
+            fi
+            ;;
+    esac
+}
+
+# manager_service_name: FreeBSD rc requires underscores; Linux managers use hyphens.
+manager_service_name() {
+    if [ "$INIT_SYSTEM" = "rc" ]; then
+        echo "$RC_SERVICE_NAME"
     else
-        OS="unknown"
+        echo "$SERVICE_NAME"
     fi
 }
 
 detect_init_system() {
+    if [ "$OS_KERNEL" = "freebsd" ] || [ "$(uname -s 2>/dev/null || true)" = "FreeBSD" ]; then
+        INIT_SYSTEM="rc"
+        SERVICE_PATH="$FREEBSD_RC_SCRIPT"
+        log_info "Detected init system: FreeBSD rc.d"
+        return
+    fi
     if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
         INIT_SYSTEM="systemd"
         SERVICE_PATH="$SYSTEMD_SERVICE_FILE"
@@ -343,53 +374,66 @@ detect_init_system() {
         SERVICE_PATH="$OPENRC_INIT_SCRIPT"
         log_info "Detected init system: OpenRC"
     else
-        log_error "Neither systemd nor OpenRC detected. Unsupported init system."
+        log_error "Unsupported init system (need systemd, OpenRC, or FreeBSD rc.d)."
         exit 1
     fi
 }
 
 # ── Init-system-agnostic helpers ────────────────────────────────────────────
 service_start()   {
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl start "$SERVICE_NAME"
-    else
-        rc-service "$SERVICE_NAME" start
-    fi
+    local name
+    name=$(manager_service_name)
+    case "$INIT_SYSTEM" in
+        systemd) systemctl start "$name" ;;
+        openrc)  rc-service "$name" start ;;
+        rc)      service "$name" start ;;
+    esac
 }
 service_stop()    {
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl stop  "$SERVICE_NAME" >/dev/null 2>&1 || true
-    else
-        rc-service "$SERVICE_NAME" stop  >/dev/null 2>&1 || true
-    fi
+    local name
+    name=$(manager_service_name)
+    case "$INIT_SYSTEM" in
+        systemd) systemctl stop  "$name" >/dev/null 2>&1 || true ;;
+        openrc)  rc-service "$name" stop  >/dev/null 2>&1 || true ;;
+        rc)      service "$name" stop >/dev/null 2>&1 || true ;;
+    esac
 }
 service_restart() {
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl restart "$SERVICE_NAME"
-    else
-        rc-service "$SERVICE_NAME" restart
-    fi
+    local name
+    name=$(manager_service_name)
+    case "$INIT_SYSTEM" in
+        systemd) systemctl restart "$name" ;;
+        openrc)  rc-service "$name" restart ;;
+        rc)      service "$name" restart ;;
+    esac
 }
 service_enable()  {
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
-    else
-        rc-update add "$SERVICE_NAME" default >/dev/null 2>&1 || true
-    fi
+    local name
+    name=$(manager_service_name)
+    case "$INIT_SYSTEM" in
+        systemd) systemctl enable "$name" >/dev/null 2>&1 ;;
+        openrc)  rc-update add "$name" default >/dev/null 2>&1 || true ;;
+        rc)      sysrc "${name}_enable=YES" >/dev/null 2>&1 || true ;;
+    esac
 }
 service_disable() {
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
-    else
-        rc-update del "$SERVICE_NAME" default >/dev/null 2>&1 || true
-    fi
+    local name
+    name=$(manager_service_name)
+    case "$INIT_SYSTEM" in
+        systemd) systemctl disable "$name" >/dev/null 2>&1 || true ;;
+        openrc)  rc-update del "$name" default >/dev/null 2>&1 || true ;;
+        rc)      sysrc "${name}_enable=NO" >/dev/null 2>&1 || true ;;
+    esac
 }
 service_is_active() {
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1
-    else
-        rc-service "$SERVICE_NAME" status >/dev/null 2>&1
-    fi
+    local name
+    name=$(manager_service_name)
+    case "$INIT_SYSTEM" in
+        systemd) systemctl is-active "$name" >/dev/null 2>&1 ;;
+        openrc)  rc-service "$name" status >/dev/null 2>&1 ;;
+        rc)      service "$name" status >/dev/null 2>&1 ;;
+        *)       return 1 ;;
+    esac
 }
 
 run_with_retry() {
@@ -430,10 +474,39 @@ install_dependencies() {
                 run_with_retry 3 2 apk add --no-cache openrc >/dev/null 2>&1
             fi
             ;;
+        freebsd)
+            if command -v pkg >/dev/null 2>&1; then
+                run_with_retry 5 3 pkg install -y curl ca_root_nss >/dev/null 2>&1 || true
+                # install.sh requires bash; best-effort if somehow invoked via other means later
+                if ! command -v bash >/dev/null 2>&1; then
+                    run_with_retry 3 2 pkg install -y bash >/dev/null 2>&1 || true
+                fi
+            else
+                log_warn "pkg not found; install curl ca_root_nss bash manually"
+            fi
+            ;;
         *)
             log_warn "OS ${OS} is not in the official support set; continuing best-effort"
             ;;
     esac
+}
+
+# Release archive name: fboard-node-{linux|freebsd}-{amd64|arm64}.tar.gz
+# Archive members are plain "fboard-node" and "fbctl".
+release_archive_name() {
+    if [ -z "$OS_KERNEL" ]; then
+        OS_KERNEL="linux"
+    fi
+    echo "fboard-node-${OS_KERNEL}-${ARCH}.tar.gz"
+}
+
+# Legacy bare-binary names (kept for local/offline installs only).
+artifact_name() {
+    local app="$1"
+    if [ -z "$OS_KERNEL" ]; then
+        OS_KERNEL="linux"
+    fi
+    echo "${app}-${OS_KERNEL}-${ARCH}"
 }
 
 ensure_dirs() {
@@ -508,6 +581,11 @@ select_binary_source() {
         echo "./fboard-node"
         return
     fi
+    if [ -f "./$(artifact_name fboard-node)" ]; then
+        echo "./$(artifact_name fboard-node)"
+        return
+    fi
+    # legacy local name still accepted on Linux hosts
     if [ -f "./fboard-node-linux-${ARCH}" ]; then
         echo "./fboard-node-linux-${ARCH}"
         return
@@ -524,24 +602,49 @@ resolve_download_url() {
     fi
 }
 
+# Download release .tar.gz and extract fboard-node + fbctl into TMP_DIR.
+download_release_archive() {
+    local archive_name archive_path extract_dir
+    archive_name=$(release_archive_name)
+    archive_path="$TMP_DIR/${archive_name}"
+    extract_dir="$TMP_DIR/extract"
+    mkdir -p "$extract_dir"
+    resolve_download_url "$archive_name"
+    log_step "Downloading release archive: ${DOWNLOAD_URL}"
+    if ! curl -fsSL "$DOWNLOAD_URL" -o "$archive_path"; then
+        log_error "Failed to download archive from ${DOWNLOAD_URL}"
+        exit 1
+    fi
+    if ! tar -xzf "$archive_path" -C "$extract_dir"; then
+        log_error "Failed to extract ${archive_name}"
+        exit 1
+    fi
+    if [ ! -f "$extract_dir/fboard-node" ] || [ ! -f "$extract_dir/fbctl" ]; then
+        log_error "Archive ${archive_name} missing fboard-node or fbctl"
+        exit 1
+    fi
+    install -m 755 "$extract_dir/fboard-node" "$TMP_DIR/fboard-node"
+    install -m 755 "$extract_dir/fbctl" "$TMP_DIR/fbctl"
+    rm -rf "$extract_dir" "$archive_path"
+}
+
 stage_binary() {
     local staged="$TMP_DIR/fboard-node"
     local local_src
+    # Prefer a release archive that already produced TMP_DIR/fboard-node
+    if [ -x "$staged" ]; then
+        return
+    fi
     local_src=$(select_binary_source)
     if [ -n "$local_src" ]; then
         log_step "Using local binary: ${local_src}"
         cp "$local_src" "$staged"
+        chmod +x "$staged"
     else
-        resolve_download_url "fboard-node-linux-${ARCH}"
-        log_step "Downloading binary: ${DOWNLOAD_URL}"
-        if ! curl -fsSL "$DOWNLOAD_URL" -o "$staged"; then
-            log_error "Failed to download binary from ${DOWNLOAD_URL}"
-            exit 1
-        fi
+        download_release_archive
     fi
-    chmod +x "$staged"
     if ! "$staged" -v >/dev/null 2>&1; then
-        log_error "Downloaded binary failed version check"
+        log_error "Staged fboard-node failed version check"
         exit 1
     fi
 }
@@ -549,6 +652,10 @@ stage_binary() {
 stage_fbctl() {
     local staged="$TMP_DIR/fbctl"
     local local_src=""
+    # download_release_archive (via stage_binary) may have already staged fbctl
+    if [ -x "$staged" ] && "$staged" version >/dev/null 2>&1; then
+        return
+    fi
     if [ -n "$CLI_BINARY_SOURCE" ]; then
         if [ ! -f "$CLI_BINARY_SOURCE" ]; then
             log_error "fbctl binary source not found: $CLI_BINARY_SOURCE"
@@ -560,23 +667,21 @@ stage_fbctl() {
         local_src="$CLI_PATH"
     elif [ -f "./fbctl" ]; then
         local_src="./fbctl"
+    elif [ -f "./$(artifact_name fbctl)" ]; then
+        local_src="./$(artifact_name fbctl)"
     elif [ -f "./fbctl-linux-${ARCH}" ]; then
         local_src="./fbctl-linux-${ARCH}"
     fi
     if [ -n "$local_src" ]; then
         log_step "Using local fbctl binary: ${local_src}"
         cp "$local_src" "$staged"
+        chmod +x "$staged"
     else
-        resolve_download_url "fbctl-linux-${ARCH}"
-        log_step "Downloading fbctl: ${DOWNLOAD_URL}"
-        if ! curl -fsSL "$DOWNLOAD_URL" -o "$staged"; then
-            log_error "Failed to download fbctl from ${DOWNLOAD_URL}"
-            exit 1
-        fi
+        # No local source and no archive yet — download archive (also stages fboard-node)
+        download_release_archive
     fi
-    chmod +x "$staged"
     if ! "$staged" version > /dev/null 2>&1; then
-        log_error "Downloaded fbctl failed version check"
+        log_error "Staged fbctl failed version check"
         exit 1
     fi
 }
@@ -619,11 +724,15 @@ render_config() {
 }
 
 render_service() {
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        _render_systemd_service
-    else
-        _render_openrc_service
-    fi
+    case "$INIT_SYSTEM" in
+        systemd) _render_systemd_service ;;
+        openrc)  _render_openrc_service ;;
+        rc)      _render_freebsd_rc_service ;;
+        *)
+            log_error "Cannot render service for init system: ${INIT_SYSTEM}"
+            exit 1
+            ;;
+    esac
 }
 
 _render_systemd_service() {
@@ -682,6 +791,47 @@ start_pre() {
 EOF_RC
 }
 
+_render_freebsd_rc_service() {
+    # FreeBSD rc.d script. Script name / rcvar use underscores (fboard_node).
+    cat >"$TMP_DIR/service-file" <<'EOF_FBSD'
+#!/bin/sh
+
+# PROVIDE: fboard_node
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="fboard_node"
+rcvar="fboard_node_enable"
+
+: ${fboard_node_enable:="NO"}
+: ${fboard_node_config:="/etc/fboard-node/config.yml"}
+: ${fboard_node_env_file:="/etc/fboard-node/credentials.env"}
+: ${fboard_node_logfile:="/var/log/fboard-node.log"}
+
+pidfile="/var/run/${name}.pid"
+command="/usr/sbin/daemon"
+command_args="-f -p ${pidfile} -o ${fboard_node_logfile} /usr/local/bin/fboard-node -c ${fboard_node_config}"
+
+start_precmd="fboard_node_prestart"
+
+fboard_node_prestart()
+{
+	if [ -f "${fboard_node_env_file}" ]; then
+		set -a
+		# shellcheck disable=SC1090
+		. "${fboard_node_env_file}"
+		set +a
+	fi
+	touch "${fboard_node_logfile}" 2>/dev/null || true
+}
+
+load_rc_config $name
+run_rc_command "$1"
+EOF_FBSD
+}
+
 backup_existing_state() {
     BACKUP_PATH="${BACKUP_DIR}/$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$BACKUP_PATH"
@@ -724,13 +874,23 @@ install_staged_files() {
         install -m 755 "$0" "$INSTALLER_COPY_PATH"
     fi
     install -m 755 "$TMP_DIR/fbctl" "$CLI_PATH"
-    ln -sf "$CLI_PATH" /usr/bin/fbctl 2>/dev/null || true
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        install -m 644 "$TMP_DIR/service-file" "$SERVICE_PATH"
-        systemctl daemon-reload
-    else
-        install -m 755 "$TMP_DIR/service-file" "$SERVICE_PATH"
+    # Linux convenience symlink; FreeBSD keeps /usr/local/bin on PATH.
+    if [ "$OS_KERNEL" != "freebsd" ]; then
+        ln -sf "$CLI_PATH" /usr/bin/fbctl 2>/dev/null || true
     fi
+    case "$INIT_SYSTEM" in
+        systemd)
+            install -m 644 "$TMP_DIR/service-file" "$SERVICE_PATH"
+            systemctl daemon-reload
+            ;;
+        openrc)
+            install -m 755 "$TMP_DIR/service-file" "$SERVICE_PATH"
+            ;;
+        rc)
+            mkdir -p /usr/local/etc/rc.d
+            install -m 755 "$TMP_DIR/service-file" "$SERVICE_PATH"
+            ;;
+    esac
     service_enable
 }
 
@@ -812,13 +972,22 @@ perform_upgrade() {
     backup_existing_state
     install -m 755 "$TMP_DIR/fboard-node" "$BINARY_PATH"
     install -m 755 "$TMP_DIR/fbctl" "$CLI_PATH"
-    ln -sf "$CLI_PATH" /usr/bin/fbctl 2>/dev/null || true
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        install -m 644 "$TMP_DIR/service-file" "$SERVICE_PATH"
-        systemctl daemon-reload
-    else
-        install -m 755 "$TMP_DIR/service-file" "$SERVICE_PATH"
+    if [ "$OS_KERNEL" != "freebsd" ]; then
+        ln -sf "$CLI_PATH" /usr/bin/fbctl 2>/dev/null || true
     fi
+    case "$INIT_SYSTEM" in
+        systemd)
+            install -m 644 "$TMP_DIR/service-file" "$SERVICE_PATH"
+            systemctl daemon-reload
+            ;;
+        openrc)
+            install -m 755 "$TMP_DIR/service-file" "$SERVICE_PATH"
+            ;;
+        rc)
+            mkdir -p /usr/local/etc/rc.d
+            install -m 755 "$TMP_DIR/service-file" "$SERVICE_PATH"
+            ;;
+    esac
     service_restart
     if ! wait_for_health; then
         log_error "Upgrade health check failed"
@@ -849,10 +1018,16 @@ perform_uninstall() {
         if [ "$INIT_SYSTEM" = "systemd" ]; then
             systemctl daemon-reload || true
         fi
+        if [ "$INIT_SYSTEM" = "rc" ]; then
+            # Drop leftover enable key from rc.conf when possible
+            sysrc -x "${RC_SERVICE_NAME}_enable" >/dev/null 2>&1 || true
+        fi
     fi
     rm -f "$BINARY_PATH"
     rm -f "$CLI_PATH"
-    rm -f /usr/bin/fbctl 2>/dev/null || true
+    if [ "$OS_KERNEL" != "freebsd" ]; then
+        rm -f /usr/bin/fbctl 2>/dev/null || true
+    fi
     if [ "$PURGE" -eq 1 ]; then
         rm -rf "$INSTALL_ROOT"
         log_info "Removed ${INSTALL_ROOT}"
@@ -883,12 +1058,14 @@ perform_status() {
         fi
     fi
     if [ -f "$SERVICE_PATH" ]; then
-        echo "  service: ${SERVICE_NAME}"
-        if [ "$INIT_SYSTEM" = "systemd" ]; then
-            systemctl status "${SERVICE_NAME}.service" --no-pager || true
-        else
-            rc-service "$SERVICE_NAME" status || true
-        fi
+        local mgr_name
+        mgr_name=$(manager_service_name)
+        echo "  service: ${mgr_name} (${INIT_SYSTEM})"
+        case "$INIT_SYSTEM" in
+            systemd) systemctl status "${SERVICE_NAME}.service" --no-pager || true ;;
+            openrc)  rc-service "$SERVICE_NAME" status || true ;;
+            rc)      service "$RC_SERVICE_NAME" status || true ;;
+        esac
     fi
 }
 
@@ -900,6 +1077,8 @@ main() {
             exit 0
             ;;
         status)
+            detect_arch
+            detect_os
             detect_init_system
             perform_status
             exit 0

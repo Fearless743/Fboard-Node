@@ -9,25 +9,46 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 )
 
 // DefaultServiceName is the unit/script/install name used to discover/init-restart
-// fboard-node. install.sh honours this name; keep them in sync.
+// fboard-node on Linux (systemd unit, OpenRC script). install.sh honours this
+// name; keep them in sync.
 const DefaultServiceName = "fboard-node"
+
+// RCServiceName is the FreeBSD rc.d script / rcvar prefix. FreeBSD rc requires
+// identifiers without hyphens, so this is fboard_node while the binary stays
+// fboard-node.
+const RCServiceName = "fboard_node"
 
 // InitSystem identifies the service manager on the host.
 type InitSystem string
 
 const (
-	InitSystemd   InitSystem = "systemd"   // systemctl-driven (Ubuntu/Debian/RHEL/Arch/SUSE family)
-	InitOpenRC    InitSystem = "openrc"    // rc-service-driven (Alpine, Devuan, Artix, Gentoo)
-	InitSysVInit  InitSystem = "sysvinit"  // legacy /etc/init.d/<name> <verb>
-	InitLaunchd   InitSystem = "launchd"   // macOS launchctl
+	InitSystemd    InitSystem = "systemd"    // systemctl-driven (Ubuntu/Debian/RHEL/Arch/SUSE family)
+	InitOpenRC     InitSystem = "openrc"     // rc-service-driven (Alpine, Devuan, Artix, Gentoo)
+	InitRC         InitSystem = "rc"         // FreeBSD service(8) / rc.d
+	InitSysVInit   InitSystem = "sysvinit"   // legacy /etc/init.d/<name> <verb>
+	InitLaunchd    InitSystem = "launchd"    // macOS launchctl
 	InitSupervisor InitSystem = "supervisor" // supervisord `supervisorctl restart <name>`
-	InitNone      InitSystem = "none"      // no manager; caller must self-respawn
+	InitNone       InitSystem = "none"       // no manager; caller must self-respawn
 )
+
+// ManagerServiceName returns the name to pass to the host service manager.
+// FreeBSD rc.d uses RCServiceName (underscores); all other managers use
+// svcName or DefaultServiceName.
+func ManagerServiceName(sys InitSystem, svcName string) string {
+	if sys == InitRC {
+		return RCServiceName
+	}
+	if svcName == "" {
+		return DefaultServiceName
+	}
+	return svcName
+}
 
 // ErrNoManager is returned when no service manager is detected and no fallback
 // is available. Callers should then self-replace + exit, or surface ack.failed.
@@ -59,13 +80,19 @@ func ResolveFbctl() string {
 // DetectInit inspects the host and returns the most likely service manager.
 // Order mirrors install.sh, with a few extras for completeness:
 //
-//  1. `/run/systemd/system` exists AND `systemctl` is callable → systemd
-//  2. `rc-service` present (Alpine / Artix / Devuan) → openrc
-//  3. `/etc/init.d/<name>` exists AND is executable → sysvinit
-//  4. `launchctl` present (Darwin) → launchd
-//  5. `supervisorctl` present (manual supervisord) → supervisor
-//  6. otherwise: none (container/dev)
+//  1. FreeBSD (runtime.GOOS) → rc  (must be first to avoid openrc/sysv false positives)
+//  2. `/run/systemd/system` exists AND `systemctl` is callable → systemd
+//  3. `rc-service` present (Alpine / Artix / Devuan) → openrc
+//  4. `/etc/init.d/<name>` exists AND is executable → sysvinit
+//  5. `launchctl` present (Darwin) → launchd
+//  6. `supervisorctl` present (manual supervisord) → supervisor
+//  7. otherwise: none (container/dev)
 func DetectInit(svcName string) InitSystem {
+	// FreeBSD always uses service(8)/rc.d. Short-circuit before Linux init
+	// probes so a hypothetically present /etc/init.d never misclassifies us.
+	if runtime.GOOS == "freebsd" {
+		return InitRC
+	}
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		if _, err := exec.LookPath("systemctl"); err == nil {
 			return InitSystemd
@@ -94,25 +121,35 @@ func DetectInit(svcName string) InitSystem {
 func IsActive(sys InitSystem, svcName string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	name := ManagerServiceName(sys, svcName)
 	var cmd *exec.Cmd
 	switch sys {
 	case InitSystemd:
-		cmd = exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", svcName+".service")
+		cmd = exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", name+".service")
 	case InitOpenRC:
-		cmd = exec.CommandContext(ctx, "rc-service", svcName, "status")
+		cmd = exec.CommandContext(ctx, "rc-service", name, "status")
+	case InitRC:
+		// FreeBSD service(8): exit 0 means running. Prefer absolute path so a
+		// stripped PATH (e.g. under some supervisors) still works.
+		bin := serviceBin()
+		cmd = exec.CommandContext(ctx, bin, name, "status")
 	case InitSysVInit:
-		cmd = exec.CommandContext(ctx, "/etc/init.d/"+svcName, "status")
+		cmd = exec.CommandContext(ctx, "/etc/init.d/"+name, "status")
 	case InitSupervisor:
-		cmd = exec.CommandContext(ctx, "supervisorctl", "status", svcName)
+		cmd = exec.CommandContext(ctx, "supervisorctl", "status", name)
 	case InitLaunchd:
 		// macOS: a fully-loaded launchd job has its PID echoed by `launchctl print`.
-		cmd = exec.CommandContext(ctx, "launchctl", "print", "system/"+svcName)
+		cmd = exec.CommandContext(ctx, "launchctl", "print", "system/"+name)
 	default:
 		return false
 	}
 	out, err := cmd.Output()
 	if err != nil {
 		return false
+	}
+	// FreeBSD service(8) status: exit 0 is authoritative.
+	if sys == InitRC {
+		return true
 	}
 	text := strings.ToLower(strings.TrimSpace(string(out)))
 	if text == "" {
@@ -135,25 +172,28 @@ func IsActive(sys InitSystem, svcName string) bool {
 // describing the failure so callers can send `ack.failed`.
 //
 // Semantics across managers:
-//   - systemd / openrc / sysvinit / supervisor: `restart` verb.
+//   - systemd / openrc / sysvinit / supervisor / FreeBSD rc: `restart` verb.
 //   - launchd: unload + load the plist (no native restart; macOS launchd).
 //
 // Timeout is 8s for systemd (Manager=RestartSec latency) and 5s for the others.
 func RestartService(sys InitSystem, svcName string) error {
+	name := ManagerServiceName(sys, svcName)
 	switch sys {
 	case InitNone:
 		return ErrNoManager
 	case InitSystemd:
-		return runWithTimeout(8*time.Second, "systemctl", "restart", svcName+".service")
+		return runWithTimeout(8*time.Second, "systemctl", "restart", name+".service")
 	case InitOpenRC:
-		return runWithTimeout(5*time.Second, "rc-service", svcName, "restart")
+		return runWithTimeout(5*time.Second, "rc-service", name, "restart")
+	case InitRC:
+		return runWithTimeout(5*time.Second, serviceBin(), name, "restart")
 	case InitSysVInit:
-		return runWithTimeout(5*time.Second, "/etc/init.d/"+svcName, "restart")
+		return runWithTimeout(5*time.Second, "/etc/init.d/"+name, "restart")
 	case InitSupervisor:
-		return runWithTimeout(5*time.Second, "supervisorctl", "restart", svcName)
+		return runWithTimeout(5*time.Second, "supervisorctl", "restart", name)
 	case InitLaunchd:
 		// macOS plist location follows the convention used by install.sh.
-		plist := "/Library/LaunchDaemons/" + svcName + ".plist"
+		plist := "/Library/LaunchDaemons/" + name + ".plist"
 		ctx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel1()
 		_ = exec.CommandContext(ctx1, "launchctl", "unload", plist).Run()
@@ -166,6 +206,14 @@ func RestartService(sys InitSystem, svcName string) error {
 	default:
 		return fmt.Errorf("unknown init system %q", sys)
 	}
+}
+
+// serviceBin returns the FreeBSD service(8) binary path.
+func serviceBin() string {
+	if p, err := exec.LookPath("service"); err == nil {
+		return p
+	}
+	return "/usr/sbin/service"
 }
 
 func runWithTimeout(d time.Duration, name string, args ...string) error {

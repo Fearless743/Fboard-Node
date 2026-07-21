@@ -468,7 +468,7 @@ func restartService(sys opsutil.InitSystem) error {
 //
 //   - Resolves fbctl via PATH + known install locations; never silent-fails.
 //   - On success, schedules a service restart under the detected init system
-//     (systemd / openrc / sysvinit / supervisor / launchd) so the new binary
+//     (systemd / openrc / FreeBSD rc / sysvinit / supervisor / launchd) so the new binary
 //     replaces this one. If no manager is registered, falls back to spawning
 //     a detached copy of ourselves and exiting.
 //   - Sends WS ops ack to the panel (best-effort) with `ok`/`failed` + detail.

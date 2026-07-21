@@ -157,7 +157,7 @@ func (s *Service) ensureNodeLog(protocol string, port int) *nlog.NodeLog {
 }
 
 // triggerServiceRestart fans the restart command out to whichever init system
-// this host runs (systemd / openrc / sysvinit / supervisor / launchd), with a
+// this host runs (systemd / openrc / FreeBSD rc / sysvinit / supervisor / launchd), with a
 // last-resort self-respawn for hosts without any service manager (containers,
 // dev shells). Mirrors the equivalent helper in internal/machine/machine.go.
 //
