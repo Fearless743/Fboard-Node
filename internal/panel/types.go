@@ -126,6 +126,10 @@ type NodeConfig struct {
 	DownMbps     int    `json:"down_mbps,omitempty"`
 	Obfs         string `json:"obfs,omitempty"`
 	ObfsPassword string `json:"obfs-password,omitempty"`
+	// ListenPorts is an optional Hy2 multi-port listen range (e.g. "10000-20000")
+	// for client UDP port hopping. Empty means listen only on ServerPort.
+	// Realms mode ignores this field.
+	ListenPorts string `json:"listen_ports,omitempty"`
 	// Realm is a full Hysteria Realms URI, e.g. realm://token@host/name
 	// (optional realm+http://). Empty means ordinary Hy2 listen.
 	Realm string `json:"realm,omitempty"`

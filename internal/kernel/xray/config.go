@@ -313,10 +313,19 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 	if nc.ListenIP != "" {
 		listenAddr = nc.ListenIP
 	}
+	// Hy2 port hopping: optional listen_ports range (e.g. "10000-20000").
+	// Xray PortList expands ranges into one UDP worker per port.
+	// Realms mode ignores multi-port listen (rendezvous punches a single path).
+	port := any(nc.ServerPort)
+	if strings.EqualFold(nc.Protocol, "hysteria") &&
+		strings.TrimSpace(nc.ListenPorts) != "" &&
+		strings.TrimSpace(nc.Realm) == "" {
+		port = strings.TrimSpace(nc.ListenPorts)
+	}
 	base := M{
 		"tag":      nc.Protocol + "-in",
 		"listen":   listenAddr,
-		"port":     nc.ServerPort,
+		"port":     port,
 		"protocol": nc.Protocol,
 		"streamSettings": M{
 			"sockopt": M{

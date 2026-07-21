@@ -801,6 +801,9 @@ func TestBuildHysteria_RealmSettings(t *testing.T) {
 	if in == nil {
 		t.Fatal("expected hysteria inbound")
 	}
+	if in["port"] != 443 {
+		t.Fatalf("plain hy2 port: got %v want 443", in["port"])
+	}
 	ss := in["streamSettings"].(M)
 	hy := ss["hysteriaSettings"].(M)
 	if _, ok := hy["realm"]; ok {
@@ -834,5 +837,56 @@ func TestBuildHysteria_RealmSettings(t *testing.T) {
 	clients := in["settings"].(M)["clients"].([]M)
 	if len(clients) != 1 || clients[0]["auth"] != "user-uuid-1" {
 		t.Fatalf("clients auth: %#v", clients)
+	}
+}
+
+func TestBuildHysteria_ListenPorts(t *testing.T) {
+	users := []model.UserSpec{{ID: 1, UUID: "user-uuid-1"}}
+	tc := kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")}
+
+	// Multi-port hop range becomes inbound port string for Xray PortList.
+	hop := &model.NodeSpec{
+		Protocol:    "hysteria",
+		Version:     2,
+		ServerPort:  443,
+		ListenPorts: "10000-10010",
+	}
+	in := buildInbound(hop, users, tc)
+	if in == nil {
+		t.Fatal("expected hysteria inbound")
+	}
+	if got := in["port"]; got != "10000-10010" {
+		t.Fatalf("hop listen port: got %v want 10000-10010", got)
+	}
+
+	// Realms mode ignores listen_ports (single punched path).
+	realmURI := "realm://tok@rendezvous.example/my-node"
+	realm := &model.NodeSpec{
+		Protocol:    "hysteria",
+		Version:     2,
+		ServerPort:  443,
+		ListenPorts: "10000-10010",
+		Realm:       realmURI,
+	}
+	in = buildInbound(realm, users, tc)
+	if in == nil {
+		t.Fatal("expected hysteria realm inbound")
+	}
+	if got := in["port"]; got != 443 {
+		t.Fatalf("realm should keep server_port, got %v", got)
+	}
+
+	// Non-hysteria protocol ignores ListenPorts.
+	vmess := &model.NodeSpec{
+		Protocol:    "vmess",
+		ServerPort:  10086,
+		ListenPorts: "10000-10010",
+	}
+	in = buildInbound(vmess, users, tc)
+	if in == nil {
+		t.Fatal("expected vmess inbound")
+	}
+	if got := in["port"]; got != 10086 {
+		t.Fatalf("vmess should ignore listen_ports, got %v", got)
 	}
 }

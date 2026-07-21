@@ -46,7 +46,6 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 		}
 	})
 
-
 	t.Run("reject unknown route target", func(t *testing.T) {
 		_, err := NodeSpecFromPanelValidated(&panel.NodeConfig{
 			Protocol:   "shadowsocks",
@@ -64,6 +63,48 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), `custom_route_rules[0].action.target references unknown outbound "missing"`) {
 			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("hysteria listen_ports round-trip and validation", func(t *testing.T) {
+		node, err := NodeSpecFromPanelValidated(&panel.NodeConfig{
+			Protocol:    "hysteria",
+			Version:     2,
+			ServerPort:  443,
+			ListenPorts: "10000-10100",
+		}, config.KernelConfig{})
+		if err != nil {
+			t.Fatalf("valid listen_ports: %v", err)
+		}
+		if node.ListenPorts != "10000-10100" {
+			t.Fatalf("ListenPorts not mapped: got %q", node.ListenPorts)
+		}
+		back := node.ToPanel()
+		if back == nil || back.ListenPorts != "10000-10100" {
+			t.Fatalf("ToPanel ListenPorts: %#v", back)
+		}
+
+		_, err = NodeSpecFromPanelValidated(&panel.NodeConfig{
+			Protocol:    "hysteria",
+			Version:     2,
+			ServerPort:  443,
+			ListenPorts: "10000-20000", // span 10001 > 1024
+		}, config.KernelConfig{})
+		if err == nil {
+			t.Fatal("expected span error, got nil")
+		}
+		if !strings.Contains(err.Error(), "exceeds max") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		_, err = NodeSpecFromPanelValidated(&panel.NodeConfig{
+			Protocol:    "hysteria",
+			Version:     2,
+			ServerPort:  443,
+			ListenPorts: "not-a-range",
+		}, config.KernelConfig{})
+		if err == nil {
+			t.Fatal("expected invalid range error, got nil")
 		}
 	})
 }

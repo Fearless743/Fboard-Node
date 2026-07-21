@@ -36,6 +36,9 @@ type NodeSpec struct {
 	DownMbps     int
 	Obfs         string
 	ObfsPassword string
+	// ListenPorts is an optional Hy2 multi-port listen range (e.g. "10000-20000")
+	// for client UDP port hopping. Empty means listen only on ServerPort.
+	ListenPorts string
 	// Realm is a Hysteria Realms URI (realm://token@host/name).
 	Realm string
 	// RealmInsecure skips rendezvous TLS verification only.
