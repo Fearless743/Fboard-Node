@@ -35,8 +35,16 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
+            make_target: build-linux
           - goos: linux
             goarch: arm64
+            make_target: build-linux-arm64
+          - goos: freebsd
+            goarch: amd64
+            make_target: build-freebsd
+          - goos: freebsd
+            goarch: arm64
+            make_target: build-freebsd-arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -55,23 +63,29 @@ jobs:
           # but keep it consistent with GHCR image names).
           REPO_BASE="${REPO_BASE,,}"
           export REPO_BASE
-          if [ "${{ matrix.goarch }}" = "amd64" ]; then
-            make build-linux
-          else
-            make build-linux-arm64
-          fi
+          make ${{ matrix.make_target }}
 
-      - name: Upload fboard-node artifact
+      - name: Pack release archive
+        run: |
+          set -euo pipefail
+          GOOS="${{ matrix.goos }}"
+          GOARCH="${{ matrix.goarch }}"
+          NODE_BIN="fboard-node-${GOOS}-${GOARCH}"
+          CLI_BIN="fbctl-${GOOS}-${GOARCH}"
+          ARCHIVE="fboard-node-${GOOS}-${GOARCH}.tar.gz"
+          STAGE="$(mktemp -d)"
+          install -m 755 "$NODE_BIN" "$STAGE/fboard-node"
+          install -m 755 "$CLI_BIN" "$STAGE/fbctl"
+          tar -C "$STAGE" -czf "$ARCHIVE" fboard-node fbctl
+          rm -rf "$STAGE"
+          ls -lh "$ARCHIVE"
+          tar -tzf "$ARCHIVE"
+
+      - name: Upload release archive artifact
         uses: actions/upload-artifact@v4
         with:
           name: fboard-node-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: fboard-node-${{ matrix.goos }}-${{ matrix.goarch }}
-
-      - name: Upload fbctl artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fbctl-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: fbctl-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: fboard-node-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
 
   release:
     name: Release
@@ -94,7 +108,7 @@ jobs:
           make_latest: ${{ startsWith(github.ref, 'refs/tags/') }}
           generate_release_notes: true
           files: |
-            dist/fboard-node-linux-amd64
-            dist/fboard-node-linux-arm64
-            dist/fbctl-linux-amd64
-            dist/fbctl-linux-arm64
+            dist/fboard-node-linux-amd64.tar.gz
+            dist/fboard-node-linux-arm64.tar.gz
+            dist/fboard-node-freebsd-amd64.tar.gz
+            dist/fboard-node-freebsd-arm64.tar.gz

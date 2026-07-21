@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,16 +30,23 @@ const (
 	defaultBinaryPath      = "/usr/local/bin/fboard-node"
 	defaultCLIPath         = "/usr/local/bin/fbctl"
 	serviceName            = "fboard-node"
+	rcServiceName          = "fboard_node" // FreeBSD rc.d (no hyphens)
 	systemdServiceFilePath = "/etc/systemd/system/fboard-node.service"
 	openrcInitScript       = "/etc/init.d/fboard-node"
-	defaultInstallRoot = "/etc/fboard-node"
+	freebsdRCScript        = "/usr/local/etc/rc.d/fboard_node"
+	defaultInstallRoot     = "/etc/fboard-node"
+	serviceLogFile         = "/var/log/fboard-node.log"
 )
 
 // Set via ldflags at build time: -X main.downloadBase=...
 var downloadBase = "https://github.com/Fearless743/Fboard-Node/releases"
 
-// initSystem returns "systemd", "openrc", or "unknown".
+// initSystem returns "systemd", "openrc", "rc" (FreeBSD), or "unknown".
+// Keep in sync with internal/opsutil.DetectInit.
 func initSystem() string {
+	if runtime.GOOS == "freebsd" {
+		return "rc"
+	}
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		if _, err2 := exec.LookPath("systemctl"); err2 == nil {
 			return "systemd"
@@ -52,12 +61,118 @@ func initSystem() string {
 	return "unknown"
 }
 
+// managerServiceName is the name passed to the host service manager.
+// FreeBSD rc requires underscores; Linux managers use the hyphenated name.
+func managerServiceName() string {
+	if initSystem() == "rc" {
+		return rcServiceName
+	}
+	return serviceName
+}
+
 // serviceFilePath returns the path for the service/init file.
 func serviceFilePath() string {
-	if initSystem() == "openrc" {
+	switch initSystem() {
+	case "openrc":
 		return openrcInitScript
+	case "rc":
+		return freebsdRCScript
+	default:
+		return systemdServiceFilePath
 	}
-	return systemdServiceFilePath
+}
+
+// ensureFbctlSymlink creates /usr/bin/fbctl → /usr/local/bin/fbctl on Linux only.
+// FreeBSD packages keep binaries under /usr/local/bin (already on PATH).
+func ensureFbctlSymlink() {
+	if runtime.GOOS == "freebsd" {
+		return
+	}
+	_ = os.Remove("/usr/bin/fbctl")
+	_ = os.Symlink(defaultCLIPath, "/usr/bin/fbctl")
+}
+
+// serviceCtl runs start|stop|restart|status via the detected init system.
+func serviceCtl(verb string, rest ...string) error {
+	name := managerServiceName()
+	switch initSystem() {
+	case "openrc":
+		return runCommand("sudo", append([]string{"rc-service", name, verb}, rest...)...)
+	case "rc":
+		return runCommand("sudo", append([]string{"service", name, verb}, rest...)...)
+	default:
+		if verb == "status" {
+			return runCommand("sudo", append([]string{"systemctl", "status", name + ".service", "--no-pager"}, rest...)...)
+		}
+		return runCommand("sudo", append([]string{"systemctl", verb, name}, rest...)...)
+	}
+}
+
+func serviceEnable() error {
+	name := managerServiceName()
+	switch initSystem() {
+	case "openrc":
+		return runCommand("sudo", "rc-update", "add", name, "default")
+	case "rc":
+		return runCommand("sudo", "sysrc", name+"_enable=YES")
+	default:
+		return runCommand("sudo", "systemctl", "enable", name)
+	}
+}
+
+func serviceDisable() error {
+	name := managerServiceName()
+	switch initSystem() {
+	case "openrc":
+		return runCommand("sudo", "rc-update", "del", name, "default")
+	case "rc":
+		return runCommand("sudo", "sysrc", name+"_enable=NO")
+	default:
+		return runCommand("sudo", "systemctl", "disable", name)
+	}
+}
+
+// serviceRestartNoSudo is used by upgrade/bind paths that already run as root.
+func serviceRestartNoSudo() error {
+	name := managerServiceName()
+	switch initSystem() {
+	case "openrc":
+		return runCommand("rc-service", name, "restart")
+	case "rc":
+		return runCommand("service", name, "restart")
+	default:
+		return runCommand("systemctl", "restart", name)
+	}
+}
+
+func serviceStopNoSudo() error {
+	name := managerServiceName()
+	switch initSystem() {
+	case "openrc":
+		return runCommand("rc-service", name, "stop")
+	case "rc":
+		return runCommand("service", name, "stop")
+	default:
+		return runCommand("systemctl", "stop", name)
+	}
+}
+
+func serviceDisableNoSudo() error {
+	name := managerServiceName()
+	switch initSystem() {
+	case "openrc":
+		return runCommand("rc-update", "del", name, "default")
+	case "rc":
+		return runCommand("sysrc", name+"_enable=NO")
+	default:
+		return runCommand("systemctl", "disable", name)
+	}
+}
+
+func serviceDaemonReload() {
+	if initSystem() == "systemd" {
+		_ = runCommand("systemctl", "daemon-reload")
+	}
 }
 
 var (
@@ -81,7 +196,7 @@ type fileRootConfig struct {
 	WS        *config.WSConfig   `yaml:"ws,omitempty"`
 	Runtime   *fileRuntimeConfig `yaml:"runtime,omitempty"`
 	Cert      *config.CertConfig `yaml:"cert,omitempty"`
-	Instances []fileInstance      `yaml:"instances,omitempty"`
+	Instances []fileInstance     `yaml:"instances,omitempty"`
 }
 
 type fileInstance struct {
@@ -307,35 +422,20 @@ func runService(args []string) error {
 	}
 	sub := args[0]
 	rest := args[1:]
-	init := initSystem()
 	switch sub {
-	case "status":
-		if init == "openrc" {
-			return runCommand("sudo", append([]string{"rc-service", serviceName, "status"}, rest...)...)
-		}
-		return runCommand("sudo", append([]string{"systemctl", "status", serviceName+".service", "--no-pager"}, rest...)...)
-	case "start", "stop", "restart":
-		if init == "openrc" {
-			return runCommand("sudo", append([]string{"rc-service", serviceName, sub}, rest...)...)
-		}
-		return runCommand("sudo", append([]string{"systemctl", sub, serviceName}, rest...)...)
+	case "status", "start", "stop", "restart":
+		return serviceCtl(sub, rest...)
 	case "enable":
-		if init == "openrc" {
-			return runCommand("sudo", "rc-update", "add", serviceName, "default")
-		}
-		return runCommand("sudo", "systemctl", "enable", serviceName)
+		return serviceEnable()
 	case "disable":
-		if init == "openrc" {
-			return runCommand("sudo", "rc-update", "del", serviceName, "default")
-		}
-		return runCommand("sudo", "systemctl", "disable", serviceName)
+		return serviceDisable()
 	case "logs":
-		if init == "openrc" {
-			logFile := "/var/log/fboard-node.log"
+		init := initSystem()
+		if init == "openrc" || init == "rc" {
 			if len(rest) == 0 {
-				return runCommand("tail", "-f", logFile)
+				return runCommand("tail", "-f", serviceLogFile)
 			}
-			return runCommand("tail", append(rest, logFile)...)
+			return runCommand("tail", append(rest, serviceLogFile)...)
 		}
 		if len(rest) == 0 {
 			rest = []string{"-f"}
@@ -404,13 +504,7 @@ func runBindAdd(mode string, args []string) error {
 	}
 	// Restart service to pick up new config
 	fmt.Println("Restarting service...")
-	var err error
-	if initSystem() == "openrc" {
-		err = runCommand("rc-service", serviceName, "restart")
-	} else {
-		err = runCommand("systemctl", "restart", serviceName)
-	}
-	if err != nil {
+	if err := serviceRestartNoSudo(); err != nil {
 		return fmt.Errorf("service restart failed: %w", err)
 	}
 	fmt.Println("Binding added successfully")
@@ -430,7 +524,11 @@ func runUpgrade(args []string) error {
 		}
 	}
 
+	goos := runtime.GOOS
 	arch := runtime.GOARCH
+	if goos != "linux" && goos != "freebsd" {
+		return fmt.Errorf("unsupported OS: %s (supported: linux, freebsd)", goos)
+	}
 	if arch != "amd64" && arch != "arm64" {
 		return fmt.Errorf("unsupported architecture: %s", arch)
 	}
@@ -442,18 +540,36 @@ func runUpgrade(args []string) error {
 	newBinary := filepath.Join(binaryDir, ".fboard-node.new")
 	newCLI := filepath.Join(cliDir, ".fbctl.new")
 
-	binaryURL := resolveDownloadURL(fmt.Sprintf("fboard-node-linux-%s", arch), version)
-	cliURL := resolveDownloadURL(fmt.Sprintf("fbctl-linux-%s", arch), version)
-
-	fmt.Printf("Downloading %s...\n", binaryURL)
-	if err := downloadFile(binaryURL, newBinary); err != nil {
-		return fmt.Errorf("download binary: %w", err)
+	// Release ships one archive per platform: fboard-node-{goos}-{arch}.tar.gz
+	// containing members "fboard-node" and "fbctl".
+	archiveName := fmt.Sprintf("fboard-node-%s-%s.tar.gz", goos, arch)
+	archiveURL := resolveDownloadURL(archiveName, version)
+	tmpDir, err := os.MkdirTemp("", "fbctl-upgrade-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	archivePath := filepath.Join(tmpDir, archiveName)
+	extractDir := filepath.Join(tmpDir, "extract")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		return fmt.Errorf("create extract dir: %w", err)
 	}
 
-	fmt.Printf("Downloading %s...\n", cliURL)
-	if err := downloadFile(cliURL, newCLI); err != nil {
+	fmt.Printf("Downloading %s...\n", archiveURL)
+	if err := downloadFile(archiveURL, archivePath); err != nil {
+		return fmt.Errorf("download archive: %w", err)
+	}
+	if err := extractReleaseArchive(archivePath, extractDir); err != nil {
+		return fmt.Errorf("extract archive: %w", err)
+	}
+	extractedNode := filepath.Join(extractDir, "fboard-node")
+	extractedCLI := filepath.Join(extractDir, "fbctl")
+	if err := copyFile(extractedNode, newBinary); err != nil {
+		return fmt.Errorf("stage binary: %w", err)
+	}
+	if err := copyFile(extractedCLI, newCLI); err != nil {
 		os.Remove(newBinary)
-		return fmt.Errorf("download fbctl: %w", err)
+		return fmt.Errorf("stage fbctl: %w", err)
 	}
 
 	if err := os.Chmod(newBinary, 0o755); err != nil {
@@ -498,23 +614,13 @@ func runUpgrade(args []string) error {
 		return fmt.Errorf("replace fbctl: %w", err)
 	}
 
-	// Recreate /usr/bin/fbctl symlink
-	os.Remove("/usr/bin/fbctl")
-	os.Symlink(defaultCLIPath, "/usr/bin/fbctl")
+	// Recreate /usr/bin/fbctl symlink (Linux only)
+	ensureFbctlSymlink()
 
 	// Restart service
 	fmt.Println("Restarting service...")
-	init := initSystem()
-	if init == "systemd" {
-		runCommand("systemctl", "daemon-reload")
-	}
-	restartCmd := func() error {
-		if init == "openrc" {
-			return runCommand("rc-service", serviceName, "restart")
-		}
-		return runCommand("systemctl", "restart", serviceName)
-	}
-	if err := restartCmd(); err != nil {
+	serviceDaemonReload()
+	if err := serviceRestartNoSudo(); err != nil {
 		fmt.Println("Restart failed, rolling back...")
 		rollbackOK := true
 		if fileExists(backupBinary) {
@@ -529,10 +635,8 @@ func runUpgrade(args []string) error {
 				rollbackOK = false
 			}
 		}
-		if init == "systemd" {
-			runCommand("systemctl", "daemon-reload")
-		}
-		if e := restartCmd(); e != nil {
+		serviceDaemonReload()
+		if e := serviceRestartNoSudo(); e != nil {
 			return fmt.Errorf("upgrade and rollback restart both failed: %w", e)
 		}
 		if rollbackOK {
@@ -589,33 +693,25 @@ func runUninstall(args []string) error {
 
 	// Stop and disable service
 	svcFile := serviceFilePath()
-	init := initSystem()
 	if fileExists(svcFile) {
-		var stopErr, disableErr error
-		if init == "openrc" {
-			stopErr = runCommand("rc-service", serviceName, "stop")
-			disableErr = runCommand("rc-update", "del", serviceName, "default")
-		} else {
-			stopErr = runCommand("systemctl", "stop", serviceName)
-			disableErr = runCommand("systemctl", "disable", serviceName)
-		}
-		if stopErr != nil {
+		if stopErr := serviceStopNoSudo(); stopErr != nil {
 			warnings = append(warnings, fmt.Sprintf("stop service: %v", stopErr))
 		}
-		if disableErr != nil {
+		if disableErr := serviceDisableNoSudo(); disableErr != nil {
 			warnings = append(warnings, fmt.Sprintf("disable service: %v", disableErr))
 		}
 		if err := os.Remove(svcFile); err != nil {
 			warnings = append(warnings, fmt.Sprintf("remove service file: %v", err))
 		}
-		if init == "systemd" {
-			runCommand("systemctl", "daemon-reload")
-		}
+		serviceDaemonReload()
 	}
 
-	// Remove binaries
 	// Remove binaries and symlinks
-	for _, p := range []string{defaultBinaryPath, defaultCLIPath, "/usr/bin/fbctl"} {
+	removePaths := []string{defaultBinaryPath, defaultCLIPath}
+	if runtime.GOOS != "freebsd" {
+		removePaths = append(removePaths, "/usr/bin/fbctl")
+	}
+	for _, p := range removePaths {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			warnings = append(warnings, fmt.Sprintf("remove %s: %v", p, err))
 		}
@@ -675,6 +771,67 @@ func downloadFile(url, dest string) error {
 	defer f.Close()
 	_, err = io.Copy(f, resp.Body)
 	return err
+}
+
+// extractReleaseArchive unpacks a release .tar.gz into destDir.
+// Expected members: "fboard-node" and "fbctl" at the archive root.
+func extractReleaseArchive(archivePath, destDir string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("gzip: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	foundNode, foundCLI := false, false
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("tar: %w", err)
+		}
+		// Only accept plain root-level files we care about.
+		name := filepath.Base(filepath.Clean(hdr.Name))
+		if name == "." || name == ".." || strings.Contains(hdr.Name, "..") {
+			continue
+		}
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+			continue
+		}
+		if name != "fboard-node" && name != "fbctl" {
+			continue
+		}
+		outPath := filepath.Join(destDir, name)
+		out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(out, tr); err != nil {
+			out.Close()
+			return err
+		}
+		if err := out.Close(); err != nil {
+			return err
+		}
+		switch name {
+		case "fboard-node":
+			foundNode = true
+		case "fbctl":
+			foundCLI = true
+		}
+	}
+	if !foundNode || !foundCLI {
+		return fmt.Errorf("archive missing required members (fboard-node=%v fbctl=%v)", foundNode, foundCLI)
+	}
+	return nil
 }
 
 func cleanupFiles(a, b string, err error) error {
@@ -804,11 +961,7 @@ func removeBinding(panelURL string, machineID int, instanceID string) error {
 		if err := writeInstallMeta(defaultMetaPath, root); err != nil {
 			return err
 		}
-		if initSystem() == "openrc" {
-			runCommand("rc-service", serviceName, "stop")
-		} else {
-			runCommand("systemctl", "stop", serviceName)
-		}
+		_ = serviceStopNoSudo()
 		fmt.Printf("removed %d binding(s)\n", len(removed))
 		fmt.Println("All bindings removed. Service stopped.")
 		fmt.Println("Use 'fbctl bind add-machine' to add a new binding, or 'fbctl uninstall' to fully uninstall.")
@@ -826,13 +979,7 @@ func removeBinding(panelURL string, machineID int, instanceID string) error {
 	if err := writeInstallMeta(defaultMetaPath, root); err != nil {
 		return err
 	}
-	var svcRestartErr error
-	if initSystem() == "openrc" {
-		svcRestartErr = runCommand("rc-service", serviceName, "restart")
-	} else {
-		svcRestartErr = runCommand("systemctl", "restart", serviceName)
-	}
-	if svcRestartErr != nil {
+	if svcRestartErr := serviceRestartNoSudo(); svcRestartErr != nil {
 		return svcRestartErr
 	}
 	fmt.Printf("removed %d binding(s)\n", len(removed))
@@ -1082,27 +1229,38 @@ func printRows(rows []instanceRow, output string) error {
 }
 
 func systemctlState() string {
-	if initSystem() == "openrc" {
-		cmd := exec.Command("rc-service", serviceName, "status")
+	name := managerServiceName()
+	switch initSystem() {
+	case "openrc":
+		cmd := exec.Command("rc-service", name, "status")
 		if err := cmd.Run(); err == nil {
 			return "active"
 		}
-		// check if the init script exists at all
 		if _, err := os.Stat(openrcInitScript); err != nil {
 			return "not-installed"
 		}
 		return "inactive"
-	}
-	cmd := exec.Command("systemctl", "is-active", serviceName)
-	out, err := cmd.CombinedOutput()
-	state := strings.TrimSpace(string(out))
-	if state != "" {
+	case "rc":
+		cmd := exec.Command("service", name, "status")
+		if err := cmd.Run(); err == nil {
+			return "active"
+		}
+		if _, err := os.Stat(freebsdRCScript); err != nil {
+			return "not-installed"
+		}
+		return "inactive"
+	default:
+		cmd := exec.Command("systemctl", "is-active", name)
+		out, err := cmd.CombinedOutput()
+		state := strings.TrimSpace(string(out))
+		if state != "" {
+			return state
+		}
+		if err != nil {
+			return "unknown"
+		}
 		return state
 	}
-	if err != nil {
-		return "unknown"
-	}
-	return state
 }
 
 func healthStatus() string {
