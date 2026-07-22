@@ -130,14 +130,25 @@ func (t *Tracker) Process(
 	}
 
 	// Compute online from alive IPs and detect changes for dirty flag.
+	// Compare set membership, not only lengths — otherwise replacing 1.1.1.1
+	// with 2.2.2.2 (same count) never flushes and the panel keeps stale devices.
 	prev := t.live.Load()
 	online := make(map[int]int, len(kernelAliveIPs))
 	changed := len(kernelAliveIPs) != len(prev.aliveIPs)
 	for uid, ips := range kernelAliveIPs {
 		online[uid] = len(ips)
-		if !changed {
-			if old, ok := prev.aliveIPs[uid]; !ok || len(old) != len(ips) {
+		if changed {
+			continue
+		}
+		old, ok := prev.aliveIPs[uid]
+		if !ok || len(old) != len(ips) {
+			changed = true
+			continue
+		}
+		for ip := range ips {
+			if !old[ip] {
 				changed = true
+				break
 			}
 		}
 	}
@@ -192,7 +203,9 @@ func (t *Tracker) RestoreTraffic(data map[int][2]int64) {
 }
 
 // FlushAliveIPs returns per-user alive IPs.
-// Reuses internal buffer. Returns nil if unchanged.
+// Returns a fresh map copy so callers (async Report/device batch) can use it
+// safely while the next Flush reuses the internal buffer.
+// Returns nil if unchanged.
 func (t *Tracker) FlushAliveIPs() map[int][]string {
 	// Fast path: skip expensive hash if Process() didn't detect changes.
 	if !t.aliveIPsDirty.Load() {
@@ -216,7 +229,7 @@ func (t *Tracker) FlushAliveIPs() map[int][]string {
 	t.lastAliveIPsHash = currentHash
 	t.aliveIPsDirty.Store(false)
 
-	// Clear old buffer entries.
+	// Clear old buffer entries (internal reuse only).
 	for k := range t.aliveIPsBuf {
 		delete(t.aliveIPsBuf, k)
 	}
@@ -234,7 +247,15 @@ func (t *Tracker) FlushAliveIPs() map[int][]string {
 		t.aliveIPsBuf[uid] = buf
 	}
 
-	return t.aliveIPsBuf
+	// Return a detached copy: async HTTP report must not share map/slices
+	// with the next FlushAliveIPs call (concurrent map write panic / data race).
+	out := make(map[int][]string, len(t.aliveIPsBuf))
+	for uid, ips := range t.aliveIPsBuf {
+		cp := make([]string, len(ips))
+		copy(cp, ips)
+		out[uid] = cp
+	}
+	return out
 }
 
 // calcAliveIPsHash computes a deterministic hash for change detection.

@@ -289,3 +289,65 @@ func TestWSClient_UserDeltaEvent(t *testing.T) {
 		t.Errorf("unexpected DeltaUsers: %+v", received[0].DeltaUsers)
 	}
 }
+
+func TestWSClient_EmptyUsersFullSyncIsDelivered(t *testing.T) {
+	// Full user sync with an empty list must reach the handler so the node can
+	// clear stale accounts while REST polling is skipped under an active WS.
+	usersPayload := syncUsersPayload{
+		Users:     []User{},
+		NodeID:    7,
+		Timestamp: 999,
+	}
+	usersData, _ := json.Marshal(usersPayload)
+
+	events := []wsMessage{
+		{Event: WSEventSyncUsers, Data: usersData},
+	}
+	server := fakeWSServer(t, events)
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "http://")
+
+	var mu sync.Mutex
+	var received []WSEvent
+
+	ws := NewWSClient("ws://"+host, "test-token", 1, WSClientConfig{MachineID: 9}, func(event WSEvent) {
+		mu.Lock()
+		received = append(received, event)
+		mu.Unlock()
+	}, nil, func() map[string]interface{} { return nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go ws.Run(ctx)
+
+	deadline := time.After(1500 * time.Millisecond)
+	for {
+		mu.Lock()
+		n := len(received)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("empty sync.users was dropped; got %d events (want 1 full clear)", n)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if received[0].Type != WSEventSyncUsers {
+		t.Fatalf("Type = %q, want %q", received[0].Type, WSEventSyncUsers)
+	}
+	if received[0].Users == nil {
+		t.Fatal("Users is nil; want non-nil empty slice for full clear")
+	}
+	if len(received[0].Users) != 0 {
+		t.Fatalf("len(Users) = %d, want 0", len(received[0].Users))
+	}
+	if received[0].NodeID != 7 {
+		t.Fatalf("NodeID = %d, want 7", received[0].NodeID)
+	}
+}

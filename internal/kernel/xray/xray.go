@@ -302,14 +302,20 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 	}
 
 	// Merge: overwrite existing users' properties, collect truly new ones.
+	// Same ID with a changed UUID must re-add the kernel credential (and drop
+	// the old one) — limits-only updates leave the account email in place.
 	userMap := make(map[int]model.UserSpec, len(x.users))
 	for _, u := range x.users {
 		userMap[u.ID] = u
 	}
 	var toAdd []model.UserSpec
+	var toReplaceOld []model.UserSpec
 	for _, u := range users {
-		if _, exists := userMap[u.ID]; !exists {
+		if old, exists := userMap[u.ID]; !exists {
 			toAdd = append(toAdd, u)
+		} else if old.UUID != u.UUID {
+			toAdd = append(toAdd, u)
+			toReplaceOld = append(toReplaceOld, old)
 		}
 		userMap[u.ID] = u // always overwrite properties
 	}
@@ -344,6 +350,13 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 	x.mu.Unlock()
 
 	ctx := context.Background()
+	// Drop old credentials before re-adding when UUID changed for same ID.
+	for _, u := range toReplaceOld {
+		email := userEmail(u.ID)
+		if err := um.RemoveUser(ctx, email); err != nil {
+			nlog.Core().Debug("xray: RemoveUser before UUID replace skipped", "user", u.ID, "error", err)
+		}
+	}
 	added := 0
 	for _, u := range toAdd {
 		mu, err := toMemoryUser(proto, nc, u)

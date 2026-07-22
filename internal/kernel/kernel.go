@@ -129,6 +129,10 @@ func ComputeHash(nc *model.NodeSpec, users []model.UserSpec) string {
 // UserDiff computes which users to add and which to remove when transitioning
 // from oldUsers to newUsers. This is a pure helper used by callers; kernels
 // may also use it internally.
+//
+// Same ID with a different UUID is treated as remove(old)+add(new): the kernel
+// keys accounts by email/user@id, but the credential is the UUID — leaving the
+// old account in place would keep revoked UUIDs working.
 func UserDiff(oldUsers, newUsers []model.UserSpec) (toAdd, toRemove []model.UserSpec) {
 	oldMap := make(map[int]model.UserSpec, len(oldUsers))
 	for _, u := range oldUsers {
@@ -141,8 +145,13 @@ func UserDiff(oldUsers, newUsers []model.UserSpec) (toAdd, toRemove []model.User
 
 	for _, u := range newUsers {
 		old, exists := oldMap[u.ID]
-		if !exists || old.UUID != u.UUID {
+		if !exists {
 			toAdd = append(toAdd, u)
+			continue
+		}
+		if old.UUID != u.UUID {
+			toAdd = append(toAdd, u)
+			toRemove = append(toRemove, old)
 		}
 	}
 	for _, u := range oldUsers {
