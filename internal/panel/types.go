@@ -147,6 +147,14 @@ type NodeConfig struct {
 	Transport      string `json:"transport,omitempty"`
 	TrafficPattern string `json:"traffic_pattern,omitempty"`
 
+	// ShadowQUIC
+	// JLSUpstream is the camouflage target (host:port), required by the protocol.
+	JLSUpstream string `json:"jls_upstream,omitempty"`
+	// ZeroRTT enables 0-RTT for ShadowQUIC QUIC transport.
+	ZeroRTT bool `json:"zero_rtt,omitempty"`
+	// ALPN is optional; defaults to ["h3"] on the node when empty.
+	ALPN []string `json:"alpn,omitempty"`
+
 	// Sudoku
 	SudokuConfig *SudokuConfig `json:"sudoku_config,omitempty"`
 

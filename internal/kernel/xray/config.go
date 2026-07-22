@@ -115,7 +115,7 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	} else {
 		nlog.Core().Warn("xray: unsupported protocol, no inbound configured",
 			"protocol", nc.Protocol,
-			"supported", "vmess, vless, trojan, shadowsocks, hysteria, socks, http, tuic, anytls, naive, mieru, sudoku")
+			"supported", "vmess, vless, trojan, shadowsocks, hysteria, socks, http, tuic, anytls, naive, mieru, shadowquic, sudoku")
 	}
 
 	// Merge panel routes and static config routes
@@ -357,6 +357,8 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 		return buildNaive(base, nc, users, tc)
 	case "mieru":
 		return buildMieru(base, nc, users)
+	case "shadowquic":
+		return buildShadowQUIC(base, nc, users)
 	case "sudoku":
 		return buildSudoku(base, nc, users)
 	default:
@@ -1252,6 +1254,46 @@ func buildMieru(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 			"transport":      transport,
 			"trafficPattern": nc.TrafficPattern,
 		},
+	}
+	return base
+}
+
+func buildShadowQUIC(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+	// ShadowQUIC authenticates via JLS username/password; Fboard uses UUID for both.
+	clients := make([]M, 0, len(users))
+	for _, u := range users {
+		clients = append(clients, M{
+			"username": u.UUID,
+			"password": u.UUID,
+			"email":    userEmail(u.ID),
+		})
+	}
+	settings := M{"clients": clients}
+	if nc.CongestionControl != "" {
+		settings["congestion_control"] = nc.CongestionControl
+	}
+	base["settings"] = settings
+
+	// Self-signed TLS is generated inside the transport; no real cert required.
+	// jls_upstream is mandatory for camouflage fallback.
+	sqSettings := M{
+		"jlsUpstream": nc.JLSUpstream,
+		"zeroRtt":     nc.ZeroRTT,
+	}
+	if nc.ServerName != "" {
+		sqSettings["serverName"] = nc.ServerName
+	}
+	if nc.CongestionControl != "" {
+		sqSettings["congestionControl"] = nc.CongestionControl
+	}
+	if len(nc.ALPN) > 0 {
+		sqSettings["alpn"] = nc.ALPN
+	} else {
+		sqSettings["alpn"] = []string{"h3"}
+	}
+	base["streamSettings"] = M{
+		"network":            "shadowquic",
+		"shadowquicSettings": sqSettings,
 	}
 	return base
 }

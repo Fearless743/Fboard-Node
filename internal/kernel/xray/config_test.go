@@ -171,6 +171,17 @@ func TestBuildConfig_AllProtocols_ValidJSON(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "shadowquic",
+			nc: panel.NodeConfig{
+				Protocol:    "shadowquic",
+				ServerPort:  443,
+				JLSUpstream: "www.cloudflare.com:443",
+				ServerName:  "www.cloudflare.com",
+				ZeroRTT:     true,
+				ALPN:        []string{"h3"},
+			},
+		},
 	}
 
 	for _, tc := range protocols {
@@ -731,6 +742,45 @@ func TestBuildSudokuInbound(t *testing.T) {
 	clients := settings["clients"].([]M)
 	if len(clients) != 1 || clients[0]["private_key"] != "deadbeef" {
 		t.Fatalf("clients: %#v", clients)
+	}
+}
+
+func TestBuildShadowQUICInbound(t *testing.T) {
+	nc := &model.NodeSpec{
+		Protocol:          "shadowquic",
+		ServerPort:        443,
+		JLSUpstream:       "www.cloudflare.com:443",
+		ServerName:        "www.cloudflare.com",
+		ZeroRTT:           true,
+		CongestionControl: "bbr",
+		ALPN:              []string{"h3"},
+	}
+	users := []model.UserSpec{{ID: 1, UUID: "11111111-1111-1111-1111-111111111111"}}
+	in := buildInbound(nc, users, kernel.TLSCert{})
+	if in == nil {
+		t.Fatal("expected shadowquic inbound")
+	}
+	if in["protocol"] != "shadowquic" {
+		t.Fatalf("protocol: %v", in["protocol"])
+	}
+	settings := in["settings"].(M)
+	clients := settings["clients"].([]M)
+	if len(clients) != 1 || clients[0]["username"] != users[0].UUID || clients[0]["password"] != users[0].UUID {
+		t.Fatalf("clients: %#v", clients)
+	}
+	ss := in["streamSettings"].(M)
+	if ss["network"] != "shadowquic" {
+		t.Fatalf("network: %v", ss["network"])
+	}
+	sq := ss["shadowquicSettings"].(M)
+	if sq["jlsUpstream"] != "www.cloudflare.com:443" {
+		t.Fatalf("jlsUpstream: %v", sq["jlsUpstream"])
+	}
+	if sq["zeroRtt"] != true {
+		t.Fatalf("zeroRtt: %v", sq["zeroRtt"])
+	}
+	if sq["serverName"] != "www.cloudflare.com" {
+		t.Fatalf("serverName: %v", sq["serverName"])
 	}
 }
 
