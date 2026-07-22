@@ -30,6 +30,7 @@ import (
 	hysteriaAccount "github.com/xtls/xray-core/proxy/hysteria/account"
 	naiveAccount "github.com/xtls/xray-core/proxy/naive/account"
 	mieruAccount "github.com/xtls/xray-core/proxy/mieru/account"
+	sqAccount "github.com/xtls/xray-core/proxy/shadowquic/account"
 	sudokuproxy "github.com/xtls/xray-core/proxy/sudoku"
 	"golang.org/x/time/rate"
 
@@ -105,7 +106,7 @@ func (x *Xray) Protocols() []string {
 	return []string{
 		"vmess", "vless", "trojan", "shadowsocks",
 		"hysteria", "socks", "http",
-		"tuic", "anytls", "naive", "mieru", "sudoku",
+		"tuic", "anytls", "naive", "mieru", "shadowquic", "sudoku",
 	}
 }
 
@@ -610,6 +611,9 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
 
 	case "mieru":
 		mu.Account = &mieruAccount.MemoryAccount{Name: u.UUID, Password: u.UUID}
+
+	case "shadowquic":
+		mu.Account = &sqAccount.MemoryAccount{Name: u.UUID, Password: u.UUID}
 
 	case "sudoku":
 		// UUID field carries Available Private Key hex for sudoku nodes.

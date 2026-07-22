@@ -49,6 +49,11 @@ type NodeSpec struct {
 	Transport         string
 	TrafficPattern    string
 
+	// ShadowQUIC
+	JLSUpstream string
+	ZeroRTT     bool
+	ALPN        []string
+
 	// Sudoku
 	SudokuConfig *SudokuConfig
 
