@@ -445,9 +445,14 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 			nlog.Core().Warn("ws: cannot decode users payload", "error", err)
 			return
 		}
+		// Empty full sync is valid: panel may clear all users for this node.
+		// Dropping it while WS is connected (REST poll skipped) leaves stale
+		// accounts in the kernel indefinitely.
+		if p.Users == nil {
+			p.Users = []User{}
+		}
 		if len(p.Users) == 0 {
-			nlog.Core().Warn("ws: users payload empty")
-			return
+			nlog.Core().Info("ws: users payload empty (full clear)")
 		}
 		event.Users = p.Users
 		event.NodeID = p.NodeID

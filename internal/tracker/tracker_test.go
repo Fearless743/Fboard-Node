@@ -206,3 +206,34 @@ func TestTrafficAccumulation(t *testing.T) {
 		t.Errorf("accumulated: got %v, want [350,600]", flushed[1])
 	}
 }
+
+func TestFlushAliveIPs_ReturnsDetachedCopy(t *testing.T) {
+	tr := New()
+	alive := map[int]map[string]bool{
+		1: {"1.1.1.1": true},
+	}
+	tr.Process(map[int][2]int64{1: {1, 1}}, alive, 1)
+
+	first := tr.FlushAliveIPs()
+	if first == nil {
+		t.Fatal("first flush returned nil")
+	}
+	// Mutate caller's map; next flush must not race / share storage.
+	first[1] = append(first[1], "9.9.9.9")
+	first[99] = []string{"hack"}
+
+	// Force another dirty cycle
+	tr.Process(map[int][2]int64{1: {2, 2}}, map[int]map[string]bool{
+		1: {"2.2.2.2": true},
+	}, 1)
+	second := tr.FlushAliveIPs()
+	if second == nil {
+		t.Fatal("second flush returned nil")
+	}
+	if _, ok := second[99]; ok {
+		t.Fatal("second flush shared map with first caller mutation")
+	}
+	if len(second[1]) != 1 || second[1][0] != "2.2.2.2" {
+		t.Fatalf("second[1] = %v, want [2.2.2.2]", second[1])
+	}
+}
