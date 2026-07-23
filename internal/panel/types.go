@@ -93,13 +93,13 @@ type NodeConfig struct {
 	BaseConfig      BaseConfig             `json:"base_config"`
 	Routes          []RouteRule            `json:"routes"`
 
-	// Kernel settings (Xboard extension)
+	// Kernel settings (Fboard extension)
 	KernelLogLevel   string            `json:"kernel_log_level,omitempty"` // "info", "warn", etc.
 	CustomOutbounds  []OutboundConfig  `json:"custom_outbounds,omitempty"`
 	CustomRoutes     []map[string]any  `json:"custom_routes,omitempty"`
 	CustomRouteRules []CustomRouteRule `json:"custom_route_rules,omitempty"`
 
-	// Certificate settings (Xboard extension)
+	// Certificate settings (Fboard extension)
 	CertConfig *CertConfig `json:"cert_config,omitempty"`
 	AutoTLS    bool        `json:"auto_tls,omitempty"` // Deprecated: use CertConfig
 	Domain     string      `json:"domain,omitempty"`   // Deprecated: use CertConfig
