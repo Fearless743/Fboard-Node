@@ -39,6 +39,7 @@ NODE_TYPE=""
 MACHINE_ID=""
 RELEASE_VERSION="${DEFAULT_RELEASE_VERSION}"
 HEALTH_PORT="${DEFAULT_HEALTH_PORT}"
+HEALTH_PORT_EXPLICIT=0
 HEALTH_ENABLED=1
 RUNTIME_GOMEMLIMIT=""
 RUNTIME_GOGC=""
@@ -252,6 +253,7 @@ parse_args() {
                 ;;
             --health-port)
                 HEALTH_PORT="$2"
+                HEALTH_PORT_EXPLICIT=1
                 shift 2
                 ;;
             --gomemlimit)
@@ -691,7 +693,6 @@ render_config() {
         config init
         --mode "$MODE"
         --panel-url "$PANEL_URL"
-        --health-port "${HEALTH_PORT:-0}"
         --token "$TOKEN"
         --version "$RELEASE_VERSION"
         --output "$TMP_DIR/config.yml"
@@ -706,6 +707,9 @@ render_config() {
         init_args+=(--credentials-in "$CREDENTIALS_FILE")
     fi
     init_args+=(--machine-id "$MACHINE_ID")
+    if [ "$HEALTH_PORT_EXPLICIT" -eq 1 ]; then
+        init_args+=(--health-port "$HEALTH_PORT")
+    fi
     if [ -n "$RUNTIME_GOMEMLIMIT" ]; then
         init_args+=(--gomemlimit "$RUNTIME_GOMEMLIMIT")
     fi
@@ -941,6 +945,8 @@ perform_install() {
     ensure_dirs
     stage_binary
     stage_fbctl
+    # 未显式传 --health-port 时，从现有配置读取
+    [ "$HEALTH_PORT_EXPLICIT" -eq 0 ] && load_health_port_from_config "$CONFIG_FILE"
     render_config
     render_service
     backup_existing_state
@@ -964,6 +970,8 @@ perform_upgrade() {
         perform_install
         return
     fi
+    # 未显式传 --health-port 时，从现有配置读取
+    [ "$HEALTH_PORT_EXPLICIT" -eq 0 ] && load_health_port_from_config "$CONFIG_FILE"
     TMP_DIR=$(mktemp -d)
     ensure_dirs
     stage_binary

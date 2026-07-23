@@ -1535,6 +1535,17 @@ func runConfigInit(args []string) error {
 		instances = deduped
 	}
 
+	// 未显式传 --health-port 时：
+	//   有其他实例设了 health_port → 0（避免端口冲突）
+	//   无现有配置或均未设   → 默认 65530（与 --help 一致）
+	if healthPort < 0 {
+		if hasExisting && hasHealthPortSet(root) {
+			healthPort = 0
+		} else {
+			healthPort = 65530
+		}
+	}
+
 	// Merge: replace if same ID exists, otherwise append.
 	replaced := false
 	for i, existing := range instances {
@@ -1654,6 +1665,21 @@ func writeInstallMetaVersioned(path string, root *config.RootConfig, ver, latest
 	data = append(data, '\n')
 	return os.WriteFile(path, data, 0o644)
 }
+
+// hasHealthPortSet returns true when the root config (or any of its instances)
+// has a non-zero health_port configured.
+func hasHealthPortSet(root *config.RootConfig) bool {
+	if root.HealthPort > 0 {
+		return true
+	}
+	for _, inst := range root.Instances {
+		if inst.HealthPort > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 
 // runConfigHealthPort reads health_port from an existing config file and
 // prints it to stdout. Exits silently if the file does not exist or has
