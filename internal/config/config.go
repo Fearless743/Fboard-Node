@@ -18,6 +18,9 @@ import (
 )
 
 // removedModesHint is appended to config errors for legacy node/standalone configs.
+const DefaultHealthPort = 65530
+
+// removedModesHint is appended to config errors for legacy node/standalone configs.
 const removedModesHint = "node mode and standalone have been removed; use machine: {machine_id, token} (see migrate-from-xboard-node.sh / fbctl config init)"
 
 type Config struct {
@@ -30,13 +33,21 @@ type Config struct {
 	Runtime    RuntimeConfig `yaml:"runtime"`
 	WS         WSConfig      `yaml:"ws"`
 	// HealthPort enables a lightweight HTTP health-check endpoint on the
-	// given port (e.g. 65530). 0 = disabled (default).
-	HealthPort int `yaml:"health_port"`
+	// given port. nil / absent = DefaultHealthPort (65530). 0 = disabled.
+	HealthPort *int `yaml:"health_port,omitempty"`
 
 	// Machine identifies this process as a panel-managed machine that
 	// dynamically discovers and runs all nodes bound to it via
 	// GET /api/v2/server/machine/nodes. This is the only supported panel mode.
 	Machine *MachineConfig `yaml:"machine,omitempty"`
+}
+
+// GetHealthPort returns the effective health port: value set, or DefaultHealthPort if nil.
+func (c *Config) GetHealthPort() int {
+	if c.HealthPort == nil {
+		return DefaultHealthPort
+	}
+	return *c.HealthPort
 }
 
 // MachineConfig identifies this process as a panel-managed machine that
@@ -795,11 +806,11 @@ func ValidateStartupLayout(instances []*Config) error {
 		if !instance.IsMachineMode() {
 			return fmt.Errorf("%s: machine mode is required; %s", owner, removedModesHint)
 		}
-		if instance.HealthPort > 0 {
-			if other, ok := healthPorts[instance.HealthPort]; ok {
-				return fmt.Errorf("health_port %d is used by both %s and %s", instance.HealthPort, other, owner)
+		if hp := instance.GetHealthPort(); hp > 0 {
+			if other, ok := healthPorts[hp]; ok {
+				return fmt.Errorf("health_port %d is used by both %s and %s", hp, other, owner)
 			}
-			healthPorts[instance.HealthPort] = owner
+			healthPorts[hp] = owner
 		}
 		if dir := strings.TrimSpace(instance.Kernel.ConfigDir); dir != "" {
 			if other, ok := configDirs[dir]; ok && other != owner {

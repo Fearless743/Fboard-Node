@@ -206,7 +206,7 @@ type fileInstance struct {
 	Kernel     fileKernelConfig   `yaml:"kernel"`
 	Log        fileLogConfig      `yaml:"log"`
 	Runtime    *fileRuntimeConfig `yaml:"runtime,omitempty"`
-	HealthPort int                `yaml:"health_port,omitempty"`
+	HealthPort *int               `yaml:"health_port,omitempty"`
 	Machine    *fileMachineConfig `yaml:"machine,omitempty"`
 	Cert       *config.CertConfig `yaml:"cert,omitempty"`
 	WS         *config.WSConfig   `yaml:"ws,omitempty"`
@@ -1269,6 +1269,7 @@ func healthStatus() string {
 
 func instanceAwareHealth() string {
 	port := 0
+	// Try meta first (fast path, no YAML parse).
 	if meta, err := loadInstallMeta(defaultMetaPath); err == nil {
 		for _, inst := range meta.Instances {
 			if inst.HealthPort > 0 {
@@ -1277,19 +1278,14 @@ func instanceAwareHealth() string {
 			}
 		}
 	}
+	// Fall back to config — GetHealthPort returns DefaultHealthPort (65530) when nil.
 	if port == 0 {
 		if root, err := loadWritableRootConfig(defaultConfigPath); err == nil {
-			// Check top-level health_port first (inherited by all instances)
-			if root.HealthPort > 0 {
-				port = root.HealthPort
-			}
-			if port == 0 {
-				instances, _ := root.NormalizeInstances()
-				for _, inst := range instances {
-					if inst.HealthPort > 0 {
-						port = inst.HealthPort
-						break
-					}
+			instances, _ := root.NormalizeInstances()
+			for _, inst := range instances {
+				if hp := inst.GetHealthPort(); hp > 0 {
+					port = hp
+					break
 				}
 			}
 		}
@@ -1369,7 +1365,7 @@ func runConfigInit(args []string) error {
 		nodeID         int
 		nodeType       string
 		machineID      int
-		healthPort     int
+		healthPort     = -1 // -1 = not explicitly set → nil (use DefaultHealthPort)
 		gomemlimit     string
 		gogc           int
 		installRoot    string
@@ -1474,9 +1470,11 @@ func runConfigInit(args []string) error {
 		Kernel: config.KernelConfig{
 			LogLevel: "warn",
 		},
-		Log:        config.LogConfig{Level: "info", Output: "stdout"},
-		HealthPort: healthPort,
-		Machine:    &config.MachineConfig{MachineID: machineID},
+		Log:     config.LogConfig{Level: "info", Output: "stdout"},
+		Machine: &config.MachineConfig{MachineID: machineID},
+	}
+	if healthPort >= 0 {
+		inst.HealthPort = &healthPort
 	}
 
 	// Generate deterministic instance ID.
@@ -1535,16 +1533,6 @@ func runConfigInit(args []string) error {
 		instances = deduped
 	}
 
-	// 未显式传 --health-port 时：
-	//   有其他实例设了 health_port → 0（避免端口冲突）
-	//   无现有配置或均未设   → 默认 65530（与 --help 一致）
-	if healthPort < 0 {
-		if hasExisting && hasHealthPortSet(root) {
-			healthPort = 0
-		} else {
-			healthPort = 65530
-		}
-	}
 
 	// Merge: replace if same ID exists, otherwise append.
 	replaced := false
@@ -1646,7 +1634,7 @@ func writeInstallMetaVersioned(path string, root *config.RootConfig, ver, latest
 			PanelURL:   inst.Panel.URL,
 			Mode:       instanceMode(inst),
 			MachineID:  machineIDPtr(&inst),
-			HealthPort: inst.HealthPort,
+			HealthPort: inst.GetHealthPort(),
 		}
 		items = append(items, item)
 	}
@@ -1666,24 +1654,9 @@ func writeInstallMetaVersioned(path string, root *config.RootConfig, ver, latest
 	return os.WriteFile(path, data, 0o644)
 }
 
-// hasHealthPortSet returns true when the root config (or any of its instances)
-// has a non-zero health_port configured.
-func hasHealthPortSet(root *config.RootConfig) bool {
-	if root.HealthPort > 0 {
-		return true
-	}
-	for _, inst := range root.Instances {
-		if inst.HealthPort > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-
 // runConfigHealthPort reads health_port from an existing config file and
-// prints it to stdout. Exits silently if the file does not exist or has
-// no health_port.
+// prints it to stdout. Returns the default 65530 if the file has no
+// explicit health_port.
 func runConfigHealthPort(args []string) error {
 	cfgPath := defaultConfigPath
 	for i := 0; i < len(args); i++ {
@@ -1703,14 +1676,17 @@ func runConfigHealthPort(args []string) error {
 	// Check instances first, then legacy top-level.
 	if len(root.Instances) > 0 {
 		for _, inst := range root.Instances {
-			if inst.HealthPort > 0 {
-				fmt.Println(inst.HealthPort)
+			if inst.HealthPort != nil && *inst.HealthPort > 0 {
+				fmt.Println(*inst.HealthPort)
 				return nil
 			}
 		}
 	}
-	if root.Config.HealthPort > 0 {
-		fmt.Println(root.Config.HealthPort)
+	if root.Config.HealthPort != nil && *root.Config.HealthPort > 0 {
+		fmt.Println(*root.Config.HealthPort)
+		return nil
 	}
+	// No explicit health_port anywhere in config → default
+	fmt.Println(config.DefaultHealthPort)
 	return nil
 }

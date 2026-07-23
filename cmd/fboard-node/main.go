@@ -87,7 +87,7 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 		nlog.Core().Error("failed to normalize initial config", "error", err)
 		os.Exit(1)
 	}
-	startHealth(initialInstances[0].HealthPort)
+	startHealth(initialInstances[0].GetHealthPort())
 	defer func() {
 		if healthSrv != nil {
 			healthSrv.Close()
@@ -140,12 +140,12 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 			os.Exit(1)
 		}
 
-		if instances[0].HealthPort != healthPort {
+		if instances[0].GetHealthPort() != healthPort {
 			if healthSrv != nil {
 				healthSrv.Close()
 				healthSrv = nil
 			}
-			startHealth(instances[0].HealthPort)
+			startHealth(instances[0].GetHealthPort())
 		}
 
 		errCh := make(chan error, len(instances))
