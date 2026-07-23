@@ -909,20 +909,16 @@ install_staged_files() {
 }
 
 wait_for_health() {
-    if ! service_is_active; then
-        return 1
-    fi
-    if [ "$HEALTH_ENABLED" -eq 0 ]; then
-        return 0
-    fi
     local attempt=0
     local max_attempts=30
     while [ "$attempt" -lt "$max_attempts" ]; do
-        if ! service_is_active; then
-            return 1
-        fi
-        if curl -fsS "http://127.0.0.1:${HEALTH_PORT}/healthz" >/dev/null 2>&1; then
-            return 0
+        if service_is_active; then
+            if [ "$HEALTH_ENABLED" -eq 0 ]; then
+                return 0
+            fi
+            if curl -fsS "http://127.0.0.1:${HEALTH_PORT}/healthz" >/dev/null 2>&1; then
+                return 0
+            fi
         fi
         sleep 1
         attempt=$((attempt + 1))
