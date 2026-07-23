@@ -713,6 +713,12 @@ render_config() {
     init_args+=(--machine-id "$MACHINE_ID")
     if [ "$HEALTH_PORT_EXPLICIT" -eq 1 ]; then
         init_args+=(--health-port "$HEALTH_PORT")
+    elif [ -f "$CONFIG_FILE" ] && grep -q 'health_port:' "$CONFIG_FILE" 2>/dev/null; then
+        # 现有配置已有 health_port（其他实例在用）→ 新实例设为 0 避免端口冲突
+        init_args+=(--health-port 0)
+    else
+        # 首次安装或现有配置未设 health_port → 默认 65530
+        init_args+=(--health-port 65530)
     fi
     if [ -n "$RUNTIME_GOMEMLIMIT" ]; then
         init_args+=(--gomemlimit "$RUNTIME_GOMEMLIMIT")
