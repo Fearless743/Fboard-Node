@@ -23,7 +23,7 @@ machine:
 #   # gogc: 50
 #   # Soft memory limit — GC becomes more aggressive near this cap.
 #   # gomemlimit: "512MiB"
-# health_port: 65530
+# health_port: 65530    # HTTP /healthz endpoint port (default: 65530, 0 to disable)
 
 # Multiple panel machines in one process:
 # instances:

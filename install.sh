@@ -22,8 +22,6 @@ INIT_SYSTEM=""                  # systemd | openrc | rc
 CLI_PATH="/usr/local/bin/fbctl"
 INSTALLER_COPY_PATH="${INSTALL_ROOT}/install.sh"
 CLI_BINARY_SOURCE=""
-DEFAULT_HEALTH_PORT=65530
-DEFAULT_MODE="machine"
 DEFAULT_ACTION="install"
 DEFAULT_RELEASE_VERSION="latest"
 DEFAULT_LOG_LEVEL="info"
@@ -38,9 +36,7 @@ NODE_ID=""
 NODE_TYPE=""
 MACHINE_ID=""
 RELEASE_VERSION="${DEFAULT_RELEASE_VERSION}"
-HEALTH_PORT="${DEFAULT_HEALTH_PORT}"
-HEALTH_PORT_EXPLICIT=0
-HEALTH_ENABLED=1
+HEALTH_PORT=""
 RUNTIME_GOMEMLIMIT=""
 RUNTIME_GOGC=""
 BINARY_SOURCE=""
@@ -73,31 +69,6 @@ cleanup_tmp() {
     CLEANUP_DONE=1
     if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
         rm -rf "$TMP_DIR"
-    fi
-}
-
-load_health_port_from_config() {
-    local cfg_path="$1"
-    if [ ! -f "$cfg_path" ]; then
-        return
-    fi
-    local parsed=""
-    if [ -x "$CLI_PATH" ]; then
-        parsed=$("$CLI_PATH" config health-port --config "$cfg_path" 2>/dev/null)
-    else
-        parsed=$(grep -m1 'health_port:' "$cfg_path" 2>/dev/null | sed 's/.*health_port:[[:space:]]*//' | tr -cd '0-9')
-    fi
-    if [ -n "$parsed" ] && [ "$parsed" -ge 0 ] 2>/dev/null; then
-        HEALTH_PORT="$parsed"
-        if [ "$HEALTH_PORT" -eq 0 ]; then
-            HEALTH_ENABLED=0
-        else
-            HEALTH_ENABLED=1
-        fi
-    else
-        # 配置文件存在但未设 health_port → 进程不监听，跳过探活
-        HEALTH_PORT=0
-        HEALTH_ENABLED=0
     fi
 }
 
@@ -140,7 +111,6 @@ rollback_install() {
             rm -f "$SERVICE_PATH"
         fi
     fi
-    load_health_port_from_config "$CONFIG_FILE"
     if [ "$INIT_SYSTEM" = "systemd" ]; then
         systemctl daemon-reload || true
     fi
@@ -257,7 +227,6 @@ parse_args() {
                 ;;
             --health-port)
                 HEALTH_PORT="$2"
-                HEALTH_PORT_EXPLICIT=1
                 shift 2
                 ;;
             --gomemlimit)
@@ -538,13 +507,6 @@ validate_install_request() {
         log_error "Token is required"
         exit 1
     fi
-    if ! [[ "$HEALTH_PORT" =~ ^[0-9]+$ ]]; then
-        log_error "health-port must be a non-negative integer"
-        exit 1
-    fi
-    if [ "$HEALTH_PORT" -eq 0 ]; then
-        HEALTH_ENABLED=0
-    fi
     validate_positive_int "Machine ID" "$MACHINE_ID"
 }
 
@@ -711,14 +673,8 @@ render_config() {
         init_args+=(--credentials-in "$CREDENTIALS_FILE")
     fi
     init_args+=(--machine-id "$MACHINE_ID")
-    if [ "$HEALTH_PORT_EXPLICIT" -eq 1 ]; then
+    if [ -n "$HEALTH_PORT" ]; then
         init_args+=(--health-port "$HEALTH_PORT")
-    elif [ -f "$CONFIG_FILE" ] && grep -q 'health_port:' "$CONFIG_FILE" 2>/dev/null; then
-        # 现有配置已有 health_port（其他实例在用）→ 新实例设为 0 避免端口冲突
-        init_args+=(--health-port 0)
-    else
-        # 首次安装或现有配置未设 health_port → 默认 65530
-        init_args+=(--health-port 65530)
     fi
     if [ -n "$RUNTIME_GOMEMLIMIT" ]; then
         init_args+=(--gomemlimit "$RUNTIME_GOMEMLIMIT")
@@ -909,14 +865,16 @@ install_staged_files() {
 }
 
 wait_for_health() {
+    local port="${HEALTH_PORT:-65530}"
+    # 显式 --health-port 0 → 不探活
+    if [ "$port" = "0" ]; then
+        return 0
+    fi
     local attempt=0
     local max_attempts=30
     while [ "$attempt" -lt "$max_attempts" ]; do
         if service_is_active; then
-            if [ "$HEALTH_ENABLED" -eq 0 ]; then
-                return 0
-            fi
-            if curl -fsS "http://127.0.0.1:${HEALTH_PORT}/healthz" >/dev/null 2>&1; then
+            if curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
                 return 0
             fi
         fi
@@ -951,8 +909,6 @@ perform_install() {
     ensure_dirs
     stage_binary
     stage_fbctl
-    # 未显式传 --health-port 时，从现有配置读取
-    [ "$HEALTH_PORT_EXPLICIT" -eq 0 ] && load_health_port_from_config "$CONFIG_FILE"
     render_config
     render_service
     backup_existing_state
@@ -963,7 +919,7 @@ perform_install() {
     log_info "Service: ${SERVICE_NAME}"
     log_info "Config: ${CONFIG_FILE}"
     log_info "Credentials: ${CREDENTIALS_FILE}"
-    if [ "$HEALTH_ENABLED" -eq 1 ]; then
+    if [ -n "$HEALTH_PORT" ]; then
         log_info "Health: http://127.0.0.1:${HEALTH_PORT}/healthz"
     fi
     log_info "CLI: ${CLI_PATH}  (run '${CLI_PATH} list' if fbctl is not in PATH)"
@@ -976,8 +932,6 @@ perform_upgrade() {
         perform_install
         return
     fi
-    # 未显式传 --health-port 时，从现有配置读取
-    [ "$HEALTH_PORT_EXPLICIT" -eq 0 ] && load_health_port_from_config "$CONFIG_FILE"
     TMP_DIR=$(mktemp -d)
     ensure_dirs
     stage_binary
