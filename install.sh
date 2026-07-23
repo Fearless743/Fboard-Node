@@ -81,7 +81,7 @@ load_health_port_from_config() {
     if [ ! -f "$cfg_path" ]; then
         return
     fi
-    local parsed
+    local parsed=""
     if [ -x "$CLI_PATH" ]; then
         parsed=$("$CLI_PATH" config health-port --config "$cfg_path" 2>/dev/null)
     else
@@ -94,6 +94,10 @@ load_health_port_from_config() {
         else
             HEALTH_ENABLED=1
         fi
+    else
+        # 配置文件存在但未设 health_port → 进程不监听，跳过探活
+        HEALTH_PORT=0
+        HEALTH_ENABLED=0
     fi
 }
 
