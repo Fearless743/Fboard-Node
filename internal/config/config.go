@@ -806,7 +806,11 @@ func ValidateStartupLayout(instances []*Config) error {
 		if !instance.IsMachineMode() {
 			return fmt.Errorf("%s: machine mode is required; %s", owner, removedModesHint)
 		}
-		if hp := instance.GetHealthPort(); hp > 0 {
+		// Only check for conflicts on explicitly-set health_port values.
+		// nil / absent means the instance inherits the process default (65530)
+		// and the health server is shared per-process anyway.
+		if instance.HealthPort != nil && *instance.HealthPort > 0 {
+			hp := *instance.HealthPort
 			if other, ok := healthPorts[hp]; ok {
 				return fmt.Errorf("health_port %d is used by both %s and %s", hp, other, owner)
 			}
