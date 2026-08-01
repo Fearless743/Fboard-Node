@@ -12,6 +12,7 @@ import (
 func newTestDispatcher() *LimitDispatcher {
 	return &LimitDispatcher{
 		limitedIPs: make(map[string]map[string]int),
+		globalIPs:  make(map[string]map[string]struct{}),
 	}
 }
 
@@ -44,19 +45,29 @@ func TestLimitDispatcher_DeviceLimitCheck(t *testing.T) {
 
 	email1 := userEmail(1)
 
+	// hard cap for limit=2 with 30% grace is 3
+	if got := hardDeviceLimit(2); got != 3 {
+		t.Fatalf("hardDeviceLimit(2) = %d, want 3", got)
+	}
+
 	// First IP should be allowed
 	if ld.checkDeviceLimit(email1, "1.1.1.1", true) {
 		t.Error("first IP should be allowed")
 	}
 
-	// Second IP should be allowed (limit=2)
+	// Second IP should be allowed (within configured limit)
 	if ld.checkDeviceLimit(email1, "2.2.2.2", true) {
 		t.Error("second IP should be allowed")
 	}
 
-	// Third unique IP should be rejected
-	if !ld.checkDeviceLimit(email1, "3.3.3.3", true) {
-		t.Error("third IP should be rejected (limit=2)")
+	// Third unique IP is within 30% grace — still allowed
+	if ld.checkDeviceLimit(email1, "3.3.3.3", true) {
+		t.Error("third IP should be allowed under 30% grace (hard cap=3)")
+	}
+
+	// Fourth unique IP exceeds hard cap — rejected
+	if !ld.checkDeviceLimit(email1, "4.4.4.4", true) {
+		t.Error("fourth IP should be rejected (hard cap=3 for limit=2)")
 	}
 
 	// Same IP as first should be allowed (already connected)
@@ -81,21 +92,104 @@ func TestLimitDispatcher_DelConn(t *testing.T) {
 	deviceLimits := map[string]int{email: 2}
 	ld.UpdateLimits(map[string]int{email: 1}, deviceLimits, nil)
 
-	// Add 2 IPs
+	// Fill to hard cap (3)
 	ld.checkDeviceLimit(email, "1.1.1.1", true)
 	ld.checkDeviceLimit(email, "2.2.2.2", true)
+	ld.checkDeviceLimit(email, "3.3.3.3", true)
 
-	// Third should be rejected
-	if !ld.checkDeviceLimit(email, "3.3.3.3", true) {
-		t.Error("third IP should be rejected")
+	// Fourth should be rejected
+	if !ld.checkDeviceLimit(email, "4.4.4.4", true) {
+		t.Error("fourth IP should be rejected at hard cap")
 	}
 
 	// Remove first IP
 	ld.delConn(email, "1.1.1.1")
 
-	// Now third IP should be allowed
-	if ld.checkDeviceLimit(email, "3.3.3.3", true) {
+	// Now a new IP should be allowed
+	if ld.checkDeviceLimit(email, "4.4.4.4", true) {
 		t.Error("after deleting one IP, new IP should be allowed")
+	}
+}
+
+func TestHardDeviceLimit(t *testing.T) {
+	cases := []struct {
+		limit int
+		want  int
+	}{
+		{0, 0},
+		{1, 2},  // ceil(1.3)=2
+		{2, 3},  // ceil(2.6)=3
+		{3, 4},  // ceil(3.9)=4
+		{10, 13},
+	}
+	for _, tc := range cases {
+		if got := hardDeviceLimit(tc.limit); got != tc.want {
+			t.Errorf("hardDeviceLimit(%d) = %d, want %d", tc.limit, got, tc.want)
+		}
+	}
+}
+
+func TestLimitDispatcher_GlobalDevices(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(1)
+	ld.UpdateLimits(map[string]int{email: 1, "uuid-1": 1}, map[string]int{email: 2, "uuid-1": 2}, nil)
+
+	// Two remote IPs already online on other nodes.
+	ld.UpdateGlobalDevices(map[int][]string{
+		1: {"10.0.0.1", "10.0.0.2"},
+	})
+
+	// Local new IP is still within hard cap 3 → allowed
+	if ld.checkDeviceLimit(email, "10.0.0.3", true) {
+		t.Fatal("third fleet-wide IP should be allowed under grace")
+	}
+
+	// Fourth fleet-wide IP must be rejected
+	if !ld.checkDeviceLimit(email, "10.0.0.4", true) {
+		t.Fatal("fourth fleet-wide IP should be rejected")
+	}
+
+	// Already-local IP stays allowed
+	if ld.checkDeviceLimit(email, "10.0.0.3", true) {
+		t.Fatal("existing local IP should always be allowed")
+	}
+
+	// Clear global — only local 10.0.0.3 remains, room for more
+	ld.ClearGlobalDevices()
+	if ld.checkDeviceLimit(email, "10.0.0.5", true) {
+		t.Fatal("after clearing remote devices, new IP should be allowed")
+	}
+}
+
+func TestLimitDispatcher_UpdateGlobalDevicesSkipsLocal(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(1)
+	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1}, nil)
+
+	if ld.checkDeviceLimit(email, "1.1.1.1", true) {
+		t.Fatal("local IP should be allowed")
+	}
+
+	// Panel snapshot includes the local IP plus a remote one.
+	ld.UpdateGlobalDevices(map[int][]string{
+		1: {"1.1.1.1", "2.2.2.2"},
+	})
+
+	ld.mu.RLock()
+	remote := ld.globalIPs[email]
+	_, hasLocal := remote["1.1.1.1"]
+	_, hasRemote := remote["2.2.2.2"]
+	ld.mu.RUnlock()
+	if hasLocal {
+		t.Fatal("local IP must not be double-counted in globalIPs")
+	}
+	if !hasRemote {
+		t.Fatal("remote IP should be stored in globalIPs")
+	}
+
+	// hard cap for limit=1 is 2; local+remote already at cap → new IP rejected
+	if !ld.checkDeviceLimit(email, "3.3.3.3", true) {
+		t.Fatal("new IP should be rejected when local+remote hit hard cap")
 	}
 }
 
@@ -208,9 +302,16 @@ func TestLimitDispatcher_TrackLinkPreservesReader(t *testing.T) {
 func TestLimitDispatcher_CloseTrackingWriterReleasesConn(t *testing.T) {
 	ld := newTestDispatcher()
 	email := userEmail(1)
+	// hard cap for limit=1 is 2; fill both slots so release is observable.
 	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1}, nil)
 	if ld.checkDeviceLimit(email, "1.1.1.1", true) {
 		t.Fatal("first connection should be allowed")
+	}
+	if ld.checkDeviceLimit(email, "2.2.2.2", true) {
+		t.Fatal("second connection should be allowed under grace")
+	}
+	if !ld.checkDeviceLimit(email, "3.3.3.3", true) {
+		t.Fatal("third connection should be rejected at hard cap")
 	}
 
 	link := &transport.Link{Reader: nopReader{}, Writer: buf.Discard}
@@ -229,7 +330,8 @@ func TestLimitDispatcher_CloseTrackingWriterReleasesConn(t *testing.T) {
 	if got := ld.connCount.Load(); got != 0 {
 		t.Fatalf("expected connCount=0 after close, got %d", got)
 	}
-	if ld.checkDeviceLimit(email, "2.2.2.2", true) {
+	// Writer close must release the 1.1.1.1 slot so a new IP fits under hard cap.
+	if ld.checkDeviceLimit(email, "3.3.3.3", true) {
 		t.Fatal("device slot should be released after writer close")
 	}
 }
