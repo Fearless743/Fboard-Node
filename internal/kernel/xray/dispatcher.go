@@ -52,11 +52,17 @@ func limitDispatcherFactory(ctx context.Context, config interface{}) (interface{
 		inner:      orig,
 		innerDisp:  inner,
 		limitedIPs: make(map[string]map[string]int),
+		globalIPs:  make(map[string]map[string]struct{}),
 	}
 	globalLimitDispatcher.Store(ld)
 	nlog.Core().Debug("xray: limit dispatcher installed")
 	return ld, nil
 }
+
+// deviceLimitGracePercent is how far past the configured device_limit a user
+// may go before new source IPs are rejected. Existing IPs always stay allowed.
+// Example: limit=2 → hard cap 3; limit=10 → hard cap 13.
+const deviceLimitGracePercent = 30
 
 // LimitDispatcher wraps xray's DefaultDispatcher to enforce per-user
 // admission checks before a request is dispatched into xray-core.
@@ -72,9 +78,13 @@ type LimitDispatcher struct {
 	// limitedUsers: users with device limit > 0, protected by mu.
 	// Needs deterministic IP ordering for kick decisions.
 	mu           sync.RWMutex
-	limitedIPs   map[string]map[string]int // email → sourceIP → refcount
-	deviceLimits map[string]int            // email → max devices
+	limitedIPs   map[string]map[string]int // email → sourceIP → local refcount
+	deviceLimits map[string]int            // email → max devices (configured)
 	emailToUID   map[string]int            // email → panel user ID
+	// globalIPs holds remote (other-node) source IPs reported by the panel via
+	// sync.devices. They count toward the hard cap but are never refcounted
+	// locally, so delConn cannot erase them.
+	globalIPs map[string]map[string]struct{} // email → set of remote IPs
 
 	// unlimitedIPs: users without device limit — sync.Map for lock-free access.
 	// Each entry is *ipCounter{ips sync.Map}.
@@ -195,12 +205,105 @@ func (d *LimitDispatcher) UpdateLimits(emailToUID map[string]int, deviceLimits, 
 	d.emailToUID = emailToUID
 	d.deviceLimits = deviceLimits
 	d.mu.Unlock()
+}
 
+// UpdateGlobalDevices replaces the remote device snapshot from the panel.
+// users is panel userID → list of source IPs currently seen across the fleet.
+// Local connections keep their own refcounts; only non-local IPs are stored
+// here so they still contribute to the hard cap.
+func (d *LimitDispatcher) UpdateGlobalDevices(users map[int][]string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Build uid → email reverse index once under the same lock.
+	// Prefer the stats email (user@N) over raw UUID keys that share the same
+	// uid, so remote IPs land under the same key as local limitedIPs.
+	uidToEmail := make(map[int]string, len(d.emailToUID))
+	for email, uid := range d.emailToUID {
+		if existing, ok := uidToEmail[uid]; ok {
+			// Prefer stats email (user@N) over raw UUID aliases.
+			if isUserEmail(email) && !isUserEmail(existing) {
+				uidToEmail[uid] = email
+			}
+			continue
+		}
+		uidToEmail[uid] = email
+	}
+
+	next := make(map[string]map[string]struct{}, len(users))
+	for uid, ips := range users {
+		email := uidToEmail[uid]
+		if email == "" {
+			// User not present on this node yet — keep a synthetic key so a
+			// later limit refresh still has the remote set if needed. Using
+			// userEmail keeps it consistent with local keys.
+			email = userEmail(uid)
+		}
+		local := d.limitedIPs[email]
+		set := make(map[string]struct{}, len(ips))
+		for _, ip := range ips {
+			if ip == "" {
+				continue
+			}
+			// Skip IPs that already have a local connection — they are
+			// tracked via limitedIPs refcounts and must not be double-counted.
+			if local != nil && local[ip] > 0 {
+				continue
+			}
+			set[ip] = struct{}{}
+		}
+		if len(set) > 0 {
+			next[email] = set
+		}
+	}
+	d.globalIPs = next
+}
+
+// ClearGlobalDevices drops the remote device snapshot (e.g. on WS disconnect).
+// Local connection tracking is left intact.
+func (d *LimitDispatcher) ClearGlobalDevices() {
+	d.mu.Lock()
+	d.globalIPs = make(map[string]map[string]struct{})
+	d.mu.Unlock()
+}
+
+// snapshotGlobalDevices returns a deep copy of the remote IP set so a new
+// LimitDispatcher can inherit fleet state across kernel restarts.
+func (d *LimitDispatcher) snapshotGlobalDevices() map[string]map[string]struct{} {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if len(d.globalIPs) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string]struct{}, len(d.globalIPs))
+	for email, ips := range d.globalIPs {
+		cp := make(map[string]struct{}, len(ips))
+		for ip := range ips {
+			cp[ip] = struct{}{}
+		}
+		out[email] = cp
+	}
+	return out
+}
+
+// restoreGlobalDevices replaces the remote IP set with a previously taken
+// snapshot. Used when the xray instance is rebuilt and a fresh dispatcher
+// would otherwise forget multi-node occupancy.
+func (d *LimitDispatcher) restoreGlobalDevices(snapshot map[string]map[string]struct{}) {
+	if snapshot == nil {
+		return
+	}
+	d.mu.Lock()
+	d.globalIPs = snapshot
+	d.mu.Unlock()
 }
 
 func (d *LimitDispatcher) ResetConns() {
 	d.mu.Lock()
 	d.limitedIPs = make(map[string]map[string]int)
+	// Keep globalIPs: they come from the panel and are independent of local
+	// connection lifecycle. Clearing them here would briefly open a window
+	// where multi-node limits stop working after a kernel restart.
 	d.mu.Unlock()
 
 	// Clear unlimited IPs
@@ -263,9 +366,58 @@ func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool
 
 // ─── Internal helpers ───────────────────────────────────────────────────────
 
-// checkDeviceLimit enforces per-user device limits.
-// Fast path: unlimited users use lock-free sync.Map.
-// Slow path: limited users use RWMutex with deterministic IP ordering.
+// isUserEmail reports whether email is the stats-tracking form "user@<id>".
+func isUserEmail(email string) bool {
+	return len(email) > 5 && email[:5] == "user@"
+}
+
+// hardDeviceLimit returns the admission ceiling after applying the grace
+// percentage. limit<=0 means unlimited (caller should not invoke this).
+func hardDeviceLimit(limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	// ceil(limit * (100+grace) / 100) without float, then at least `limit`.
+	hard := (limit*(100+deviceLimitGracePercent) + 99) / 100
+	if hard < limit {
+		return limit
+	}
+	return hard
+}
+
+// distinctDeviceCount returns how many unique source IPs the user currently
+// occupies, merging local connections with remote (panel-synced) IPs.
+// Must be called with d.mu held (read or write).
+func (d *LimitDispatcher) distinctDeviceCount(email, extraIP string) int {
+	seen := make(map[string]struct{}, 8)
+	if local := d.limitedIPs[email]; local != nil {
+		for ip, n := range local {
+			if n > 0 {
+				seen[ip] = struct{}{}
+			}
+		}
+	}
+	if remote := d.globalIPs[email]; remote != nil {
+		for ip := range remote {
+			seen[ip] = struct{}{}
+		}
+	}
+	if extraIP != "" {
+		seen[extraIP] = struct{}{}
+	}
+	return len(seen)
+}
+
+// checkDeviceLimit enforces per-user device limits across local + remote IPs.
+// Returns true when the connection must be rejected.
+//
+// Policy:
+//   - device_limit <= 0 → unlimited (lock-free path)
+//   - already-known local IP → always allowed (reconnect / multi-conn)
+//   - new IP allowed while distinct count (local∪remote∪new) <= hard cap
+//     where hard cap = ceil(device_limit * 1.30)
+//   - when over hard cap, only the lexicographically lowest hard-cap IPs win
+//     (deterministic, shared across nodes for the same IP set)
 func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string, isTCP bool) bool {
 	d.mu.RLock()
 	limit, hasLimit := d.deviceLimits[email]
@@ -284,20 +436,11 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string, isTCP bool) b
 		return false
 	}
 
-	// Slow path: user has device limit — need deterministic ordering.
-	d.mu.RLock()
-	ips := d.limitedIPs[email]
-	if ips != nil && ips[sourceIP] > 0 {
-		d.mu.RUnlock()
-		if isTCP {
-			d.mu.Lock()
-			d.limitedIPs[email][sourceIP]++
-			d.mu.Unlock()
-		}
-		return false
-	}
+	hard := hardDeviceLimit(limit)
 
-	if ips != nil && len(ips) < limit {
+	// Fast path: already-known local IP — always allow (and bump refcount).
+	d.mu.RLock()
+	if ips := d.limitedIPs[email]; ips != nil && ips[sourceIP] > 0 {
 		d.mu.RUnlock()
 		if isTCP {
 			d.mu.Lock()
@@ -305,23 +448,57 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string, isTCP bool) b
 				d.limitedIPs[email] = make(map[string]int)
 			}
 			d.limitedIPs[email][sourceIP]++
+			// IP moved local — drop from remote set to avoid double-count.
+			if remote := d.globalIPs[email]; remote != nil {
+				delete(remote, sourceIP)
+			}
+			d.mu.Unlock()
+		}
+		return false
+	}
+
+	// Under hard cap with room for this new IP?
+	if d.distinctDeviceCount(email, sourceIP) <= hard {
+		d.mu.RUnlock()
+		if isTCP {
+			d.mu.Lock()
+			// Re-check under write lock to close the TOCTOU window.
+			if d.limitedIPs[email] == nil {
+				d.limitedIPs[email] = make(map[string]int)
+			}
+			if d.limitedIPs[email][sourceIP] > 0 || d.distinctDeviceCount(email, sourceIP) <= hard {
+				d.limitedIPs[email][sourceIP]++
+				if remote := d.globalIPs[email]; remote != nil {
+					delete(remote, sourceIP)
+				}
+			} else {
+				// Lost the race — fall through to deterministic reject under
+				// the same write lock by re-running the slow path inline.
+				d.mu.Unlock()
+				return d.checkDeviceLimitSlow(email, sourceIP, isTCP, hard)
+			}
 			d.mu.Unlock()
 		}
 		return false
 	}
 	d.mu.RUnlock()
 
-	// Over limit — need write lock for deterministic check.
+	return d.checkDeviceLimitSlow(email, sourceIP, isTCP, hard)
+}
+
+// checkDeviceLimitSlow is the write-locked admission path used when the fast
+// path believes we are at/over the hard cap (or lost a race).
+func (d *LimitDispatcher) checkDeviceLimitSlow(email, sourceIP string, isTCP bool, hard int) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Re-check under write lock.
-	ips = d.limitedIPs[email]
+	ips := d.limitedIPs[email]
 	if ips == nil {
 		ips = make(map[string]int)
 		d.limitedIPs[email] = ips
 	}
 
+	// Already local.
 	if ips[sourceIP] > 0 {
 		if isTCP {
 			ips[sourceIP]++
@@ -329,25 +506,44 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string, isTCP bool) b
 		return false
 	}
 
-	if len(ips) < limit {
+	// Room under hard cap (local ∪ remote ∪ new).
+	if d.distinctDeviceCount(email, sourceIP) <= hard {
 		if isTCP {
 			ips[sourceIP]++
+			if remote := d.globalIPs[email]; remote != nil {
+				delete(remote, sourceIP)
+			}
 		}
 		return false
 	}
 
-	// Over limit — deterministic: allow lowest IPs lexicographically.
-	ipList := make([]string, 0, len(ips)+1)
-	for ip := range ips {
+	// Over hard cap — deterministic: keep the lowest `hard` IPs.
+	ipSet := make(map[string]struct{}, hard+1)
+	for ip, n := range ips {
+		if n > 0 {
+			ipSet[ip] = struct{}{}
+		}
+	}
+	if remote := d.globalIPs[email]; remote != nil {
+		for ip := range remote {
+			ipSet[ip] = struct{}{}
+		}
+	}
+	ipSet[sourceIP] = struct{}{}
+
+	ipList := make([]string, 0, len(ipSet))
+	for ip := range ipSet {
 		ipList = append(ipList, ip)
 	}
-	ipList = append(ipList, sourceIP)
 	sort.Strings(ipList)
 
-	for i := 0; i < limit && i < len(ipList); i++ {
+	for i := 0; i < hard && i < len(ipList); i++ {
 		if ipList[i] == sourceIP {
 			if isTCP {
 				ips[sourceIP]++
+				if remote := d.globalIPs[email]; remote != nil {
+					delete(remote, sourceIP)
+				}
 			}
 			return false
 		}

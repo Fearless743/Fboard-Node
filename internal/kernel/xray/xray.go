@@ -156,6 +156,12 @@ func (x *Xray) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls ker
 	x.mu.Lock()
 	old := x.instance
 	oldLD := x.limitDispatcher
+	// Carry fleet-wide device occupancy across the new dispatcher so a
+	// kernel rebuild does not briefly disable multi-node limits.
+	var globalSnap map[string]map[string]struct{}
+	if oldLD != nil {
+		globalSnap = oldLD.snapshotGlobalDevices()
+	}
 	x.instance = inst
 	x.limitDispatcher = ld
 	x.users = users
@@ -167,6 +173,10 @@ func (x *Xray) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls ker
 	x.lastKernelHash = kernel.ComputeHash(nodeConfig, users)
 	x.running.Store(true)
 	x.mu.Unlock()
+
+	if ld != nil && globalSnap != nil {
+		ld.restoreGlobalDevices(globalSnap)
+	}
 
 	// ── Phase 5: Recycle old (background, non-blocking) ─────────────────
 	closeOld(old, oldLD)
@@ -278,11 +288,28 @@ func (x *Xray) SetSpeedLimitFunc(fn func(string) *rate.Limiter) {
 // gate-kept by LimitDispatcher.checkDeviceLimit at Dispatch time.
 func (x *Xray) SetDeviceLimitFunc(_ func(string) (int, bool)) {}
 
-// UpdateGlobalDevices is a no-op for xray — xray handles device limits differently.
-func (x *Xray) UpdateGlobalDevices(_ map[int][]string) {}
+// UpdateGlobalDevices merges the panel's fleet-wide device snapshot into the
+// LimitDispatcher so multi-node device limits can be enforced locally.
+func (x *Xray) UpdateGlobalDevices(users map[int][]string) {
+	x.mu.Lock()
+	ld := x.limitDispatcher
+	x.mu.Unlock()
+	if ld == nil {
+		return
+	}
+	ld.UpdateGlobalDevices(users)
+}
 
-// ClearGlobalDevices is a no-op for xray.
-func (x *Xray) ClearGlobalDevices() {}
+// ClearGlobalDevices drops the remote device snapshot (e.g. on WS disconnect).
+func (x *Xray) ClearGlobalDevices() {
+	x.mu.Lock()
+	ld := x.limitDispatcher
+	x.mu.Unlock()
+	if ld == nil {
+		return
+	}
+	ld.ClearGlobalDevices()
+}
 
 // ─── User management (non-disruptive where possible) ────────────────────────
 
