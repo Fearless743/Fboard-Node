@@ -15,33 +15,32 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/uuid"
 	xrayCore "github.com/xtls/xray-core/core"
+	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/features/stats"
-	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/infra/conf/serial"
 	xrayProxy "github.com/xtls/xray-core/proxy"
-	"github.com/xtls/xray-core/proxy/shadowsocks"
-	ss2022 "github.com/xtls/xray-core/proxy/shadowsocks_2022"
-	"github.com/xtls/xray-core/proxy/trojan"
-	"github.com/xtls/xray-core/proxy/vless"
-	"github.com/xtls/xray-core/proxy/vmess"
-	tuicAccount "github.com/xtls/xray-core/proxy/tuic/account"
 	anytlsproxy "github.com/xtls/xray-core/proxy/anytls"
 	hysteriaAccount "github.com/xtls/xray-core/proxy/hysteria/account"
-	naiveAccount "github.com/xtls/xray-core/proxy/naive/account"
 	mieruAccount "github.com/xtls/xray-core/proxy/mieru/account"
+	naiveAccount "github.com/xtls/xray-core/proxy/naive/account"
 	sqAccount "github.com/xtls/xray-core/proxy/shadowquic/account"
+	"github.com/xtls/xray-core/proxy/shadowsocks"
+	ss2022 "github.com/xtls/xray-core/proxy/shadowsocks_2022"
 	sudokuproxy "github.com/xtls/xray-core/proxy/sudoku"
+	"github.com/xtls/xray-core/proxy/trojan"
+	tuicAccount "github.com/xtls/xray-core/proxy/tuic/account"
+	"github.com/xtls/xray-core/proxy/vless"
+	"github.com/xtls/xray-core/proxy/vmess"
 	"golang.org/x/time/rate"
-
 
 	_ "github.com/xtls/xray-core/main/distro/all"
 
 	"github.com/fearless743/fboard-node/internal/config"
 	"github.com/fearless743/fboard-node/internal/kernel"
 	"github.com/fearless743/fboard-node/internal/kernel/geodata"
-	"github.com/fearless743/fboard-node/internal/nlog"
 	"github.com/fearless743/fboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/nlog"
 )
 
 const (
@@ -76,6 +75,13 @@ type Xray struct {
 	lastKernelHash  string
 	cumTraffic      map[int][2]int64
 	speedLimitFunc  func(string) *rate.Limiter
+
+	// statsMu guards cumTraffic only. It lets GetUserTraffic iterate all users
+	// reading xray's (atomic) traffic counters OUTSIDE mu, so an O(users) stats
+	// pass never blocks Start / AddUsers / RemoveUsers / UpdateUsers / Reload,
+	// which all need mu. mu is still held for the brief snapshot below; the slow
+	// per-user loop runs under statsMu instead.
+	statsMu sync.Mutex
 
 	// running is set after a successful Start and cleared before shutdown.
 	// Atomic so IsRunning / GetConnections never block.
@@ -169,7 +175,9 @@ func (x *Xray) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls ker
 	x.tls = tls
 	x.protocol = nodeConfig.Protocol
 	x.inboundTag = nodeConfig.Protocol + "-in"
+	x.statsMu.Lock()
 	x.cumTraffic = make(map[int][2]int64)
+	x.statsMu.Unlock()
 	x.lastKernelHash = kernel.ComputeHash(nodeConfig, users)
 	x.running.Store(true)
 	x.mu.Unlock()
@@ -249,10 +257,22 @@ func (x *Xray) GetUserTraffic(_ context.Context) (traffic map[int][2]int64, aliv
 		return nil, nil, 0, nil
 	}
 
+	// Snapshot the fields aggregateStats needs under a brief mu hold, then
+	// iterate all users (O(users)) outside mu so traffic accounting never
+	// blocks Start / AddUsers / RemoveUsers / Reload. instance and users are
+	// replaced wholesale (never mutated in place), so a captured reference stays
+	// valid after mu is released. cumTraffic writes are guarded by statsMu.
 	x.mu.Lock()
+	inst := x.instance
+	users := x.users
 	ld := x.limitDispatcher
-	traffic, err = x.aggregateStats()
 	x.mu.Unlock()
+
+	if inst == nil {
+		return nil, nil, 0, nil
+	}
+
+	traffic, err = x.aggregateStats(inst, users)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -783,11 +803,12 @@ func drainConns(ld *LimitDispatcher, timeout time.Duration) {
 	}
 }
 
-// aggregateStats is a fallback path that reads xray's built-in stats counters
-// when LimitDispatcher is not available. Returns per-user cumulative traffic.
-// Must be called with x.mu held.
-func (x *Xray) aggregateStats() (map[int][2]int64, error) {
-	sm := x.instance.GetFeature(stats.ManagerType())
+// aggregateStats reads xray's built-in stats counters and accumulates per-user
+// cumulative traffic. inst and users must be a stable snapshot captured under
+// mu by the caller; it iterates them here OUTSIDE mu, holding only statsMu to
+// protect the shared cumTraffic map.
+func (x *Xray) aggregateStats(inst *xrayCore.Instance, users []model.UserSpec) (map[int][2]int64, error) {
+	sm := inst.GetFeature(stats.ManagerType())
 	if sm == nil {
 		return nil, nil
 	}
@@ -796,8 +817,11 @@ func (x *Xray) aggregateStats() (map[int][2]int64, error) {
 		return nil, nil
 	}
 
+	x.statsMu.Lock()
+	defer x.statsMu.Unlock()
+
 	traffic := make(map[int][2]int64)
-	for _, u := range x.users {
+	for _, u := range users {
 		email := userEmail(u.ID)
 
 		var dUp, dDown int64

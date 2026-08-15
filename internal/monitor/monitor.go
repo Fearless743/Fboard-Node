@@ -16,6 +16,26 @@ import (
 
 var startTime = time.Now()
 
+// collectTTL bounds how fresh a cached sample may be before Collect() forces a
+// re-fetch. Machine mode runs one node service per node in a single process, and
+// each runs its own push ticker; the tickers fire on the same cadence within a
+// small window. Without coalescing, every node re-runs the same expensive
+// host-wide syscalls (cpu.Percent, load.Avg, mem/disk, net.IOCounters,
+// runtime.ReadMemStats) on every push, and each collectNetSpeed() call advances
+// the shared global network baseline — splitting one real rate across N nodes and
+// under-reporting it ~N times. A short cache collapses a burst of near-simultaneous
+// Collect() calls into a single sampling pass, preserving the exact Status shape
+// and—since the nodes sample the same host—the reported values.
+const collectTTL = time.Second
+
+// cached holds the most recent process-wide sample so concurrent callers in the
+// same push window share one syscall batch.
+var (
+	cacheMu   sync.Mutex
+	cacheTime time.Time
+	cacheStat Status
+)
+
 func init() {
 	// Warm up the CPU sampler. The first cpu.Percent call with interval=0
 	// always returns 0% because it has no prior sample. This throwaway call
@@ -117,8 +137,29 @@ func collectNetSpeed() (inSpeed, outSpeed float64) {
 	return inSpeed, outSpeed
 }
 
-// Collect gathers current system metrics
+// Collect gathers current system metrics, coalescing concurrent calls within a
+// short window into a single process-wide sampling pass. See collectTTL.
 func Collect() Status {
+	now := time.Now()
+
+	// Fast path: a fresh cached sample is already available — serve it.
+	cacheMu.Lock()
+	if !cacheTime.IsZero() && now.Sub(cacheTime) < collectTTL {
+		s := cacheStat
+		cacheMu.Unlock()
+		return s
+	}
+	// Slow path: refresh the sample while holding the lock so that a burst of
+	// concurrent callers shares one syscall batch instead of each re-fetching.
+	defer cacheMu.Unlock()
+	cacheTime = now
+	cacheStat = collect()
+	return cacheStat
+}
+
+// collect performs the actual host metric sampling. It is intentionally unexported
+// and always runs a full pass; Collect() decides when a pass is needed.
+func collect() Status {
 	var s Status
 
 	s.Uptime = uint64(time.Since(startTime).Seconds())
