@@ -737,6 +737,18 @@ func applyStreamSettings(base M, nc *model.NodeSpec, tc kernel.TLSCert) {
 					xhttpSettings["extra"] = m
 				}
 			}
+			// xhttp uplink/downlink separation: pass through a full streamSettings
+			// object for the downlink when provided in networkSettings.
+			for _, key := range []string{"downloadSettings", "download_settings"} {
+				if v, ok := nc.NetworkSettings[key]; ok {
+					if m, ok := v.(map[string]interface{}); ok && len(m) > 0 {
+						sanitizeEmptyArrays(m)
+						xhttpSettings["downloadSettings"] = m
+					} else if v != nil {
+						xhttpSettings["downloadSettings"] = v
+					}
+				}
+			}
 		}
 		ss["xhttpSettings"] = xhttpSettings
 
@@ -757,6 +769,23 @@ func applyStreamSettings(base M, nc *model.NodeSpec, tc kernel.TLSCert) {
 		if nc.TLSSettings != nil {
 			if sn, ok := nc.TLSSettings["server_name"]; ok && sn != "" {
 				tlsSettings["serverName"] = sn
+			}
+			// ALPN: pass through (e.g. h3 for VLESS-TLS-SplitHTTP-H3)
+			if v, ok := nc.TLSSettings["alpn"]; ok && v != nil {
+				switch a := v.(type) {
+				case []interface{}:
+					alpn := make([]string, 0, len(a))
+					for _, item := range a {
+						alpn = append(alpn, fmt.Sprintf("%v", item))
+					}
+					if len(alpn) > 0 {
+						tlsSettings["alpn"] = alpn
+					}
+				case []string:
+					if len(a) > 0 {
+						tlsSettings["alpn"] = a
+					}
+				}
 			}
 			// ECH server-side: extract key from tls_settings.ech
 			if echKeys := extractECHServerKeys(nc.TLSSettings); echKeys != "" {
