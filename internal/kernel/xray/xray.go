@@ -22,6 +22,7 @@ import (
 	xrayProxy "github.com/xtls/xray-core/proxy"
 	anytlsproxy "github.com/xtls/xray-core/proxy/anytls"
 	hysteriaAccount "github.com/xtls/xray-core/proxy/hysteria/account"
+	masqueAccount "github.com/xtls/xray-core/proxy/masque/account"
 	mieruAccount "github.com/xtls/xray-core/proxy/mieru/account"
 	naiveAccount "github.com/xtls/xray-core/proxy/naive/account"
 	sqAccount "github.com/xtls/xray-core/proxy/shadowquic/account"
@@ -106,7 +107,7 @@ func (x *Xray) Protocols() []string {
 	return []string{
 		"vmess", "vless", "trojan", "shadowsocks",
 		"hysteria", "socks", "http",
-		"tuic", "anytls", "naive", "mieru", "shadowquic", "sudoku", "trusttunnel",
+		"tuic", "anytls", "naive", "mieru", "shadowquic", "sudoku", "trusttunnel", "masque",
 	}
 }
 
@@ -667,6 +668,10 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
 		// Username and password are both the user UUID (panel convention);
 		// the proxy authenticates by password.
 		mu.Account = &ttAccount.MemoryAccount{Username: u.UUID, Password: u.UUID}
+
+	case "masque":
+		// Same UUID convention; the transport hub authenticates by password.
+		mu.Account = &masqueAccount.MemoryAccount{Username: u.UUID, Password: u.UUID}
 
 	default:
 		return nil, fmt.Errorf("protocol %q does not support MemoryUser", proto)

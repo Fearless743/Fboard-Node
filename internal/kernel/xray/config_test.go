@@ -191,6 +191,17 @@ func TestBuildConfig_AllProtocols_ValidJSON(t *testing.T) {
 				TrustTunnelUpstreamProtocol: "http2",
 			},
 		},
+		{
+			name: "masque",
+			nc: panel.NodeConfig{
+				Protocol:         "masque",
+				ServerPort:       443,
+				MasqueAddresses:  []string{"10.99.0.1/24"},
+				MasquePath:       "/.well-known/masque/ip/",
+				MasqueMTU:        1280,
+				MasqueServerName: "vpn.example.com",
+			},
+		},
 	}
 
 	for _, tc := range protocols {
@@ -988,5 +999,52 @@ func TestBuildHysteria_ListenPorts(t *testing.T) {
 	}
 	if got := in["port"]; got != 10086 {
 		t.Fatalf("vmess should ignore listen_ports, got %v", got)
+	}
+}
+
+func TestBuildMasqueInbound(t *testing.T) {
+	nc := &model.NodeSpec{
+		Protocol:              "masque",
+		ServerPort:            443,
+		MasqueAddresses:       []string{"10.99.0.1/24"},
+		MasqueAdvertiseRoutes: []string{"0.0.0.0/0"},
+		MasquePath:            "/.well-known/masque/ip/",
+		MasqueMTU:             1280,
+		MasqueServerName:      "vpn.example.com",
+	}
+	users := []model.UserSpec{{ID: 9, UUID: "99999999-9999-9999-9999-999999999999"}}
+	tc := kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")}
+	in := buildInbound(nc, users, tc)
+	if in == nil {
+		t.Fatal("expected masque inbound")
+	}
+	if in["protocol"] != "masque" {
+		t.Fatalf("protocol: %v", in["protocol"])
+	}
+	settings := in["settings"].(M)
+	clients := settings["clients"].([]M)
+	if len(clients) != 1 || clients[0]["username"] != users[0].UUID || clients[0]["password"] != users[0].UUID {
+		t.Fatalf("clients: %#v", clients)
+	}
+	if clients[0]["email"] != "user@9" {
+		t.Fatalf("email: %v", clients[0]["email"])
+	}
+	addrs, ok := settings["addresses"].([]string)
+	if !ok || len(addrs) != 1 || addrs[0] != "10.99.0.1/24" {
+		t.Fatalf("addresses: %v", settings["addresses"])
+	}
+	ss := in["streamSettings"].(M)
+	if ss["network"] != "masque" {
+		t.Fatalf("network: %v", ss["network"])
+	}
+	ms, ok := ss["masqueSettings"].(M)
+	if !ok {
+		t.Fatalf("masqueSettings missing: %v", ss)
+	}
+	if ms["path"] != "/.well-known/masque/ip/" {
+		t.Fatalf("path: %v", ms["path"])
+	}
+	if ms["certificate"] != "CERT" || ms["key"] != "KEY" {
+		t.Fatalf("cert not inlined: %v", ms)
 	}
 }
