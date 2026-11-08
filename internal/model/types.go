@@ -68,6 +68,14 @@ type NodeSpec struct {
 	TrustTunnelDNSUpstreams        []string
 	TrustTunnelSkipVerification    bool
 
+	// MASQUE (Xray proxy/masque: RFC 9484 CONNECT-IP over HTTP/3 + QUIC)
+	MasqueAddresses       []string
+	MasqueAdvertiseRoutes []string
+	MasquePath            string
+	MasqueMTU             int
+	MasqueServerName      string
+	MasqueAllowInsecure   bool
+
 	Multiplex           *MultiplexConfig
 	AcceptProxyProtocol bool
 }

@@ -119,7 +119,7 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	} else {
 		nlog.Core().Warn("xray: unsupported protocol, no inbound configured",
 			"protocol", nc.Protocol,
-			"supported", "vmess, vless, trojan, shadowsocks, hysteria, socks, http, tuic, anytls, naive, mieru, shadowquic, sudoku, trusttunnel")
+			"supported", "vmess, vless, trojan, shadowsocks, hysteria, socks, http, tuic, anytls, naive, mieru, shadowquic, sudoku, trusttunnel, masque")
 	}
 
 	// Merge panel routes and static config routes
@@ -409,6 +409,8 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 		return buildSudoku(base, nc, users)
 	case "trusttunnel":
 		return buildTrustTunnel(base, nc, users, tc)
+	case "masque":
+		return buildMasque(base, nc, users, tc)
 	default:
 		return nil
 	}
@@ -1468,5 +1470,54 @@ func buildTrustTunnel(base M, nc *model.NodeSpec, users []model.UserSpec, tc ker
 			nlog.Core().Warn("trusttunnel requires TLS certificate; configure cert_mode (self, file, http, dns, or content)")
 		}
 	}
+	return base
+}
+
+func buildMasque(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+	// Fboard maps both username and password to the user UUID (same as
+	// shadowquic/mieru/trusttunnel); the proxy authenticates by password.
+	clients := make([]M, 0, len(users))
+	for _, u := range users {
+		clients = append(clients, M{
+			"username": u.UUID,
+			"password": u.UUID,
+			"email":    userEmail(u.ID),
+		})
+	}
+	settings := M{"clients": clients}
+	if len(nc.MasqueAddresses) > 0 {
+		settings["addresses"] = nc.MasqueAddresses
+	}
+	if len(nc.MasqueAdvertiseRoutes) > 0 {
+		settings["advertise_routes"] = nc.MasqueAdvertiseRoutes
+	}
+	if nc.MasqueMTU > 0 {
+		settings["mtu"] = nc.MasqueMTU
+	}
+	base["settings"] = settings
+	// MASQUE runs its own QUIC+TLS listener inside the transport hub; the
+	// certificate is inlined from the node cert automation (same pattern as
+	// stream TLS inlining, but consumed by transport/internet/masque).
+	masqueSettings := M{}
+	if nc.MasquePath != "" {
+		masqueSettings["path"] = nc.MasquePath
+	}
+	if tc.HasCert() {
+		masqueSettings["certificate"] = string(tc.CertPEM)
+		masqueSettings["key"] = string(tc.KeyPEM)
+	} else {
+		nlog.Core().Warn("masque requires TLS certificate; configure cert_mode (self, file, http, dns, or content)")
+	}
+	ss := M{
+		"network":        "masque",
+		"masqueSettings": masqueSettings,
+	}
+	// Preserve the base stream sockopt (reusePort).
+	if old, ok := base["streamSettings"].(M); ok {
+		if sockopt, ok := old["sockopt"]; ok {
+			ss["sockopt"] = sockopt
+		}
+	}
+	base["streamSettings"] = ss
 	return base
 }

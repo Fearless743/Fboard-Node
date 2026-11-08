@@ -168,8 +168,15 @@ func TestXraySetSpeedLimitFuncUsesPatchedCorePath(t *testing.T) {
 	if ttMu.Email != "user@2" {
 		t.Fatalf("MemoryUser.Email = %s, want user@2", ttMu.Email)
 	}
-}
 
+	mqMu, err := toMemoryUser("masque", &model.NodeSpec{Protocol: "masque"}, model.UserSpec{ID: 3, UUID: "33333333-3333-3333-3333-333333333333"})
+	if err != nil {
+		t.Fatalf("toMemoryUser(masque) error = %v", err)
+	}
+	if mqMu.Email != "user@3" {
+		t.Fatalf("MemoryUser.Email = %s, want user@3", mqMu.Email)
+	}
+}
 
 func TestXrayCapabilities(t *testing.T) {
 	x := New(config.KernelConfig{})
@@ -181,7 +188,6 @@ func TestXrayCapabilities(t *testing.T) {
 		t.Fatalf("unexpected force-close xray capabilities: %+v", caps)
 	}
 }
-
 
 func TestXrayUpdateBandwidthLimitsWritesPatchedCoreFeature(t *testing.T) {
 	inst := new(xrayCore.Instance)
@@ -197,7 +203,6 @@ func TestXrayUpdateBandwidthLimitsWritesPatchedCoreFeature(t *testing.T) {
 		t.Fatal("expected patched bandwidth feature to receive user limiter")
 	}
 }
-
 
 func TestXrayUpdateBandwidthLimitsUsesSpeedLimitFunc(t *testing.T) {
 	inst := new(xrayCore.Instance)
@@ -221,7 +226,6 @@ func TestXrayUpdateBandwidthLimitsUsesSpeedLimitFunc(t *testing.T) {
 	}
 }
 
-
 func TestXrayUpdateBandwidthLimitsFallsBackToUserSpeed(t *testing.T) {
 	inst := new(xrayCore.Instance)
 	bm := featurebandwidth.New()
@@ -236,7 +240,6 @@ func TestXrayUpdateBandwidthLimitsFallsBackToUserSpeed(t *testing.T) {
 		t.Fatal("expected fallback limiter derived from user speed")
 	}
 }
-
 
 func TestXrayUpdateUsersLimitOnlyRefreshesDispatcherAndBandwidth(t *testing.T) {
 	x := New(config.KernelConfig{})
