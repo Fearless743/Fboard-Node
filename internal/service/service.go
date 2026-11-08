@@ -397,10 +397,36 @@ func (s *Service) applyRemoteOverrides(ctx context.Context, nc *model.NodeSpec) 
 	return false
 }
 
+// validatePanelCertPaths whitelists panel-supplied cert_file/key_file before
+// they are ever opened. File mode is only reachable with an explicit
+// cert_mode=file or auto-detected file paths; in both cases both paths must
+// pass config.ValidateCertFilePath. Anything else is rejected and file mode
+// is never used for this update.
+func validatePanelCertPaths(newCfg *config.CertConfig, configDir string) error {
+	mode := strings.ToLower(strings.TrimSpace(newCfg.CertMode))
+	usesFile := mode == "file" ||
+		(mode == "" && !newCfg.AutoTLS &&
+			strings.TrimSpace(newCfg.CertFile) != "" && strings.TrimSpace(newCfg.KeyFile) != "")
+	if !usesFile {
+		return nil
+	}
+	if err := config.ValidateCertFilePath(newCfg.CertFile, configDir); err != nil {
+		return fmt.Errorf("cert_file: %w", err)
+	}
+	if err := config.ValidateCertFilePath(newCfg.KeyFile, configDir); err != nil {
+		return fmt.Errorf("key_file: %w", err)
+	}
+	return nil
+}
+
 // applyPanelCert converts a panel CertConfig into the local config format and
 // reconfigures the cert manager. Reports whether cert paths changed.
 func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig) bool {
 	if newCfg == nil {
+		return false
+	}
+	if err := validatePanelCertPaths(newCfg, s.cfg.Kernel.ConfigDir); err != nil {
+		s.log().Error("refusing panel cert config: illegal file path", "error", err)
 		return false
 	}
 	cfgCopy := *newCfg
@@ -587,6 +613,24 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if version == "" {
 			version = "latest"
 		}
+		if err := opsutil.ValidateUpgradeVersion(version); err != nil {
+			s.log().Warn("remote upgrade rejected: invalid version", "error", err)
+			if s.wsClient != nil {
+				s.wsClient.SendOpAck("upgrade", "failed", err.Error())
+			}
+			return
+		}
+		checksum, err := opsutil.NormalizeChecksum(event.UpgradeChecksum)
+		if err != nil {
+			s.log().Warn("remote upgrade rejected: invalid checksum", "error", err)
+			if s.wsClient != nil {
+				s.wsClient.SendOpAck("upgrade", "failed", err.Error())
+			}
+			return
+		}
+		if checksum == "" {
+			s.log().Warn("remote upgrade without checksum: archive will not be verified")
+		}
 		s.log().Info(fmt.Sprintf("remote upgrade requested, version: %s", version))
 
 		ack := func(status, detail string) {
@@ -601,7 +645,11 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 				ack("failed", "fbctl binary not found on host; install via install.sh or `make install`")
 				return
 			}
-			out, err := exec.Command(fbctl, "upgrade", "--version", version).CombinedOutput()
+			args := []string{"upgrade", "--version", version}
+			if checksum != "" {
+				args = append(args, "--checksum", checksum)
+			}
+			out, err := exec.Command(fbctl, args...).CombinedOutput()
 			if err != nil {
 				detail := string(out)
 				if detail == "" {

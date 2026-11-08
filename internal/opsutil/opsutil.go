@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -36,6 +37,47 @@ const (
 	InitSupervisor InitSystem = "supervisor" // supervisord `supervisorctl restart <name>`
 	InitNone       InitSystem = "none"       // no manager; caller must self-respawn
 )
+
+// upgradeVersionRe strictly limits remote upgrade versions to plain release
+// tags (e.g. "v1.2.3", "latest"). Anything else could smuggle shell
+// metacharacters or path traversal into the fbctl exec / download URL.
+var upgradeVersionRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// MaxUpgradeVersionLen caps the accepted upgrade version string length.
+const MaxUpgradeVersionLen = 64
+
+// ValidateUpgradeVersion rejects empty, over-long, or non-tag version strings
+// received from the panel before they reach exec / download code paths.
+func ValidateUpgradeVersion(v string) error {
+	if v == "" {
+		return errors.New("upgrade version is empty")
+	}
+	if len(v) > MaxUpgradeVersionLen {
+		return fmt.Errorf("upgrade version exceeds %d chars", MaxUpgradeVersionLen)
+	}
+	if !upgradeVersionRe.MatchString(v) {
+		return fmt.Errorf("upgrade version %q contains illegal characters", v)
+	}
+	return nil
+}
+
+// checksumRe matches a lowercase/uppercase hex sha256 digest.
+var checksumRe = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
+// NormalizeChecksum validates an optional panel-supplied sha256 checksum.
+// Empty input returns "" (caller must warn and proceed without verification).
+// Malformed non-empty input is an error — never silently downgrade to
+// unverified download.
+func NormalizeChecksum(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	if !checksumRe.MatchString(s) {
+		return "", fmt.Errorf("checksum must be 64 hex chars")
+	}
+	return strings.ToLower(s), nil
+}
 
 // ManagerServiceName returns the name to pass to the host service manager.
 // FreeBSD rc.d uses RCServiceName (underscores); all other managers use

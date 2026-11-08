@@ -357,6 +357,9 @@ func (c *Client) injectAuth(m map[string]interface{}) {
 }
 
 // authQuery builds URL query parameters for GET requests.
+// The token stays in the query only as a fallback for panels that predate
+// Authorization-header auth; new panels must prefer the Bearer header set in
+// doRequest. machine_id / node_id routing fields are not secret.
 func (c *Client) authQuery() url.Values {
 	q := url.Values{}
 	q.Set("token", c.token)
@@ -412,6 +415,12 @@ func (c *Client) doRequest(method, path string, body []byte, ifNoneMatch string)
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	// Primary auth channel: Bearer header keeps the token out of URLs
+	// (server access logs, proxies, error messages). The query/body token
+	// is retained only as a fallback for older panels.
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 	if ifNoneMatch != "" {
 		req.Header.Set("If-None-Match", ifNoneMatch)
 	}

@@ -12,6 +12,14 @@ import (
 // Matches the panel-side cap in ServerService::hysteriaListenPorts.
 const maxHysteriaListenPorts = 1024
 
+// MaxCustomOutbounds caps panel-supplied custom outbounds: each entry becomes
+// a live outbound (sockets, timers, goroutines) in the kernel.
+const MaxCustomOutbounds = 20
+
+// MaxCustomRoutes caps panel-supplied custom routes (raw + structured rules):
+// unbounded rule lists inflate kernel memory and per-connection match cost.
+const MaxCustomRoutes = 200
+
 // ValidateNodeSpec validates the node spec against the fixed xray kernel capabilities.
 func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	if n == nil {
@@ -20,6 +28,13 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 
 	if err := validateHysteriaListenPorts(n); err != nil {
 		return err
+	}
+
+	if len(n.CustomOutbounds) > MaxCustomOutbounds {
+		return fmt.Errorf("custom_outbounds exceeds max %d (got %d)", MaxCustomOutbounds, len(n.CustomOutbounds))
+	}
+	if len(n.CustomRoutes)+len(n.CustomRouteRules) > MaxCustomRoutes {
+		return fmt.Errorf("custom_routes exceeds max %d (got %d)", MaxCustomRoutes, len(n.CustomRoutes)+len(n.CustomRouteRules))
 	}
 
 	additionalOutboundSources, err := collectAdditionalOutboundTagSources(kcfg.CustomConfig, kcfg.CustomOutbound)

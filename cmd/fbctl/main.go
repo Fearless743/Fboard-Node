@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,7 @@ import (
 	"time"
 
 	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/opsutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -340,7 +343,7 @@ func printUsage() {
   fbctl bind add-machine --panel-url URL --token TOKEN --machine-id ID
   fbctl bind remove <instance-id>
   fbctl bind remove-machine --panel URL --machine-id ID
-  fbctl upgrade [--version VERSION]
+  fbctl upgrade [--version VERSION] [--checksum SHA256]
   fbctl uninstall [--purge] [--yes]
   fbctl version
 
@@ -517,11 +520,23 @@ func runUpgrade(args []string) error {
 	}
 
 	version := "latest"
+	checksum := ""
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--version" && i+1 < len(args) {
 			version = args[i+1]
 			i++
+		} else if args[i] == "--checksum" && i+1 < len(args) {
+			checksum = args[i+1]
+			i++
 		}
+	}
+
+	if err := opsutil.ValidateUpgradeVersion(version); err != nil {
+		return fmt.Errorf("invalid --version: %w", err)
+	}
+	checksum, err := opsutil.NormalizeChecksum(checksum)
+	if err != nil {
+		return fmt.Errorf("invalid --checksum: %w", err)
 	}
 
 	goos := runtime.GOOS
@@ -543,7 +558,10 @@ func runUpgrade(args []string) error {
 	// Release ships one archive per platform: fboard-node-{goos}-{arch}.tar.gz
 	// containing members "fboard-node" and "fbctl".
 	archiveName := fmt.Sprintf("fboard-node-%s-%s.tar.gz", goos, arch)
-	archiveURL := resolveDownloadURL(archiveName, version)
+	archiveURL, err := resolveDownloadURL(archiveName, version)
+	if err != nil {
+		return err
+	}
 	tmpDir, err := os.MkdirTemp("", "fbctl-upgrade-*")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
@@ -558,6 +576,15 @@ func runUpgrade(args []string) error {
 	fmt.Printf("Downloading %s...\n", archiveURL)
 	if err := downloadFile(archiveURL, archivePath); err != nil {
 		return fmt.Errorf("download archive: %w", err)
+	}
+	if checksum != "" {
+		if err := verifyFileSHA256(archivePath, checksum); err != nil {
+			os.Remove(archivePath)
+			return fmt.Errorf("checksum verification: %w", err)
+		}
+		fmt.Println("Checksum verified.")
+	} else {
+		fmt.Println("Warning: no --checksum provided, skipping archive verification.")
 	}
 	if err := extractReleaseArchive(archivePath, extractDir); err != nil {
 		return fmt.Errorf("extract archive: %w", err)
@@ -747,11 +774,36 @@ func ensureRoot(cmd string) error {
 	return nil
 }
 
-func resolveDownloadURL(artifact, version string) string {
-	if version == "latest" {
-		return downloadBase + "/latest/download/" + artifact
+// resolveDownloadURL builds the release archive URL for the given artifact
+// and version. The download base must be https — upgrades fetch and execute
+// binaries, so cleartext transport is refused outright.
+func resolveDownloadURL(artifact, version string) (string, error) {
+	base := strings.TrimSpace(downloadBase)
+	if !strings.HasPrefix(strings.ToLower(base), "https://") {
+		return "", fmt.Errorf("refusing non-https download base %q", downloadBase)
 	}
-	return downloadBase + "/download/" + version + "/" + artifact
+	if version == "latest" {
+		return base + "/latest/download/" + artifact, nil
+	}
+	return base + "/download/" + version + "/" + artifact, nil
+}
+
+// verifyFileSHA256 compares the sha256 of the file at path against the
+// expected lowercase hex digest.
+func verifyFileSHA256(path, expected string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("hash archive: %w", err)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != expected {
+		return fmt.Errorf("sha256 mismatch: expected %s, got %s", expected, got)
+	}
+	return nil
 }
 
 func downloadFile(url, dest string) error {

@@ -53,7 +53,16 @@ func main() {
 	runWithReload(rootCfg, *configPath)
 }
 
+// instanceRetryInterval is how long a machine instance waits before retrying
+// after its orchestrator exits with an error (e.g. its panel is unreachable
+// at startup). The instance keeps retrying until shutdown so a single failing
+// panel never takes down sibling instances.
+const instanceRetryInterval = 30 * time.Second
+
 // runWithReload restarts all machine services when the config file changes.
+// Each machine instance is supervised independently: a panel-side failure in
+// one instance is logged and retried with backoff without cancelling the
+// siblings. Only local config errors and process signals stop the process.
 func runWithReload(initialRoot *config.RootConfig, configPath string) {
 	var healthSrv *http.Server
 	var healthPort int
@@ -148,7 +157,6 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 			startHealth(instances[0].GetHealthPort())
 		}
 
-		errCh := make(chan error, len(instances))
 		doneCh := make(chan struct{})
 		var wg sync.WaitGroup
 		for _, instanceCfg := range instances {
@@ -156,16 +164,32 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				nlog.Core().Info("starting machine instance",
-					"instance", instanceCfg.InstanceID,
-					"machine_id", instanceCfg.Machine.MachineID,
-					"panel_url", instanceCfg.Panel.URL,
-				)
-				orch := machine.New(instanceCfg)
-				if err := orch.Run(ctx); err != nil {
-					nlog.Core().Error("machine instance exited with error", "instance", instanceCfg.InstanceID, "error", err)
-					errCh <- err
-					cancel()
+				for {
+					nlog.Core().Info("starting machine instance",
+						"instance", instanceCfg.InstanceID,
+						"machine_id", instanceCfg.Machine.MachineID,
+						"panel_url", instanceCfg.Panel.URL,
+					)
+					orch := machine.New(instanceCfg)
+					if err := orch.Run(ctx); err != nil {
+						// Panel-side failure (e.g. unreachable panel during
+						// initial discovery): keep siblings alive and retry
+						// with backoff until shutdown.
+						nlog.Core().Error("machine instance exited with error, retrying",
+							"instance", instanceCfg.InstanceID,
+							"machine_id", instanceCfg.Machine.MachineID,
+							"error", err,
+							"retry_in", instanceRetryInterval.String(),
+						)
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(instanceRetryInterval):
+						}
+						continue
+					}
+					// orch.Run returns nil only after ctx cancellation.
+					return
 				}
 			}()
 		}
@@ -186,10 +210,6 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 		}
 
 		if newRoot == nil {
-			close(errCh)
-			if err := <-errCh; err != nil {
-				os.Exit(1)
-			}
 			nlog.Core().Info("stopped")
 			return
 		}

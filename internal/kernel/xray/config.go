@@ -37,6 +37,10 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	var outbounds []M
 	tags := make(map[string]bool)
 
+	// Panel-supplied file paths are untrusted: drop an ECH key_path that
+	// escapes the whitelist before anything attempts to read it.
+	sanitizeECHKeyPath(nc, kcfg.ConfigDir)
+
 	// Panel-defined custom outbounds (structured, converted to Xray native)
 	for _, co := range nc.CustomOutbounds {
 		outbounds = append(outbounds, outboundConfigToXray(co))
@@ -147,6 +151,48 @@ func mergeRouteList(a, b []map[string]any) []map[string]any {
 	res = append(res, a...)
 	res = append(res, b...)
 	return res
+}
+
+// validateCustomLimits caps merged custom outbounds/routes (panel-supplied +
+// static file config) before they are compiled into the kernel config.
+// Unbounded lists inflate kernel memory and per-connection match cost, so
+// exceeding the cap fails the build instead of starting a bloated kernel.
+func validateCustomLimits(kcfg config.KernelConfig, nc *model.NodeSpec) error {
+	if nc == nil {
+		return nil
+	}
+	if n := len(nc.CustomOutbounds) + len(kcfg.CustomOutbound); n > model.MaxCustomOutbounds {
+		return fmt.Errorf("custom outbounds exceed max %d (got %d)", model.MaxCustomOutbounds, n)
+	}
+	if n := len(nc.CustomRoutes) + len(nc.CustomRouteRules) + len(kcfg.CustomRoute); n > model.MaxCustomRoutes {
+		return fmt.Errorf("custom routes exceed max %d (got %d)", model.MaxCustomRoutes, n)
+	}
+	return nil
+}
+
+// sanitizeECHKeyPath drops a panel-supplied tls_settings.ech.key_path that
+// fails the cert file whitelist, before anything attempts to read it.
+// Inline ech.key is unaffected.
+func sanitizeECHKeyPath(nc *model.NodeSpec, configDir string) {
+	if nc == nil || len(nc.TLSSettings) == 0 {
+		return
+	}
+	raw, ok := nc.TLSSettings["ech"]
+	if !ok {
+		return
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	kp, _ := m["key_path"].(string)
+	if strings.TrimSpace(kp) == "" {
+		return
+	}
+	if err := config.ValidateCertFilePath(kp, configDir); err != nil {
+		nlog.Core().Warn("ECH key_path rejected by whitelist, ignoring", "error", err)
+		delete(m, "key_path")
+	}
 }
 
 // mergeCustomXray deep-merges a custom Xray config file into the generated config.
