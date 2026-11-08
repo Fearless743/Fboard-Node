@@ -169,13 +169,14 @@ type NodeConfig struct {
 	TrustTunnelDNSUpstreams        []string `json:"trusttunnel_dns_upstreams,omitempty"`
 	TrustTunnelSkipVerification    bool     `json:"trusttunnel_skip_verification,omitempty"`
 
-	// MASQUE (Xray proxy/masque: RFC 9484 CONNECT-IP over HTTP/3 + QUIC)
-	MasqueAddresses       []string `json:"masque_addresses,omitempty"`
-	MasqueAdvertiseRoutes []string `json:"masque_advertise_routes,omitempty"`
-	MasquePath            string   `json:"masque_path,omitempty"`
-	MasqueMTU             int      `json:"masque_mtu,omitempty"`
-	MasqueServerName      string   `json:"masque_server_name,omitempty"`
-	MasqueAllowInsecure   bool     `json:"masque_allow_insecure,omitempty"`
+	// MASQUE (Xray proxy/masque: CONNECT-IP over HTTP/3 + QUIC, dual-mode)
+	MasqueAddresses          []string `json:"masque_addresses,omitempty"`
+	MasqueAdvertiseRoutes    []string `json:"masque_advertise_routes,omitempty"`
+	MasquePath               string   `json:"masque_path,omitempty"`
+	MasqueMTU                int      `json:"masque_mtu,omitempty"`
+	MasqueServerName         string   `json:"masque_server_name,omitempty"`
+	MasqueAllowInsecure      bool     `json:"masque_allow_insecure,omitempty"`
+	MasqueEndpointPrivateKey string   `json:"masque_endpoint_private_key,omitempty"`
 
 	// Multiplex
 	Multiplex *MultiplexConfig `json:"multiplex,omitempty"`

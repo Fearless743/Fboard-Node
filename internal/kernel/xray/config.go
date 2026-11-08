@@ -1495,18 +1495,19 @@ func buildMasque(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.T
 		settings["mtu"] = nc.MasqueMTU
 	}
 	base["settings"] = settings
-	// MASQUE runs its own QUIC+TLS listener inside the transport hub; the
-	// certificate is inlined from the node cert automation (same pattern as
-	// stream TLS inlining, but consumed by transport/internet/masque).
+	// MASQUE serves its own QUIC+TLS from the endpoint ECDSA key (usque
+	// pinning architecture): the certificate is self-signed by the
+	// transport, so no cert_config TLS material is consumed here.
+	// Sing-box clients must skip verification (insecure); usque/mihomo
+	// clients pin the endpoint public key.
 	masqueSettings := M{}
 	if nc.MasquePath != "" {
 		masqueSettings["path"] = nc.MasquePath
 	}
-	if tc.HasCert() {
-		masqueSettings["certificate"] = string(tc.CertPEM)
-		masqueSettings["key"] = string(tc.KeyPEM)
+	if strings.TrimSpace(nc.MasqueEndpointPrivateKey) != "" {
+		masqueSettings["endpoint_key"] = nc.MasqueEndpointPrivateKey
 	} else {
-		nlog.Core().Warn("masque requires TLS certificate; configure cert_mode (self, file, http, dns, or content)")
+		nlog.Core().Warn("masque requires endpoint private key; configure masque_endpoint_private_key")
 	}
 	ss := M{
 		"network":        "masque",

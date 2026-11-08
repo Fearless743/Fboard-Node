@@ -1401,7 +1401,7 @@ func validateNodeRuntime(kcfgSupported []string, spec *model.NodeSpec, tls kerne
 func validateTLSRequirements(spec *model.NodeSpec, tls kernel.TLSCert) error {
 	needsCert := false
 	switch spec.Protocol {
-	case "hysteria", "hysteria2", "tuic", "anytls", "trusttunnel", "masque":
+	case "hysteria", "hysteria2", "tuic", "anytls", "trusttunnel":
 		needsCert = true
 	case "trojan":
 		if spec.TLS != 2 {

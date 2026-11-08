@@ -141,6 +141,7 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 		MasqueMTU:                      nc.MasqueMTU,
 		MasqueServerName:               nc.MasqueServerName,
 		MasqueAllowInsecure:            nc.MasqueAllowInsecure,
+		MasqueEndpointPrivateKey:       nc.MasqueEndpointPrivateKey,
 		Multiplex:                      multiplex,
 		AcceptProxyProtocol:            nc.AcceptProxyProtocol,
 	}
@@ -322,6 +323,7 @@ func (n *NodeSpec) ToPanel() *panel.NodeConfig {
 		MasqueMTU:                      n.MasqueMTU,
 		MasqueServerName:               n.MasqueServerName,
 		MasqueAllowInsecure:            n.MasqueAllowInsecure,
+		MasqueEndpointPrivateKey:       n.MasqueEndpointPrivateKey,
 		Multiplex:                      multiplex,
 		AcceptProxyProtocol:            n.AcceptProxyProtocol,
 	}

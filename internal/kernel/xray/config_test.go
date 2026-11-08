@@ -194,12 +194,13 @@ func TestBuildConfig_AllProtocols_ValidJSON(t *testing.T) {
 		{
 			name: "masque",
 			nc: panel.NodeConfig{
-				Protocol:         "masque",
-				ServerPort:       443,
-				MasqueAddresses:  []string{"10.99.0.1/24"},
-				MasquePath:       "/.well-known/masque/ip/",
-				MasqueMTU:        1280,
-				MasqueServerName: "vpn.example.com",
+				Protocol:                 "masque",
+				ServerPort:               443,
+				MasqueAddresses:          []string{"10.99.0.1/24"},
+				MasquePath:               "/.well-known/masque/ip/",
+				MasqueMTU:                1280,
+				MasqueServerName:         "vpn.example.com",
+				MasqueEndpointPrivateKey: "test-endpoint-key-pem",
 			},
 		},
 	}
@@ -1004,16 +1005,18 @@ func TestBuildHysteria_ListenPorts(t *testing.T) {
 
 func TestBuildMasqueInbound(t *testing.T) {
 	nc := &model.NodeSpec{
-		Protocol:              "masque",
-		ServerPort:            443,
-		MasqueAddresses:       []string{"10.99.0.1/24"},
-		MasqueAdvertiseRoutes: []string{"0.0.0.0/0"},
-		MasquePath:            "/.well-known/masque/ip/",
-		MasqueMTU:             1280,
-		MasqueServerName:      "vpn.example.com",
+		Protocol:                 "masque",
+		ServerPort:               443,
+		MasqueAddresses:          []string{"10.99.0.1/24"},
+		MasqueAdvertiseRoutes:    []string{"0.0.0.0/0"},
+		MasquePath:               "/.well-known/masque/ip/",
+		MasqueMTU:                1280,
+		MasqueServerName:         "vpn.example.com",
+		MasqueEndpointPrivateKey: "test-endpoint-key-pem",
 	}
-	users := []model.UserSpec{{ID: 9, UUID: "99999999-9999-9999-9999-999999999999"}}
-	tc := kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")}
+	// UUID slot carries the base64 device public key (dual-mode credential).
+	users := []model.UserSpec{{ID: 9, UUID: "ZGV2aWNlLXB1YmtleQ=="}}
+	tc := kernel.TLSCert{}
 	in := buildInbound(nc, users, tc)
 	if in == nil {
 		t.Fatal("expected masque inbound")
@@ -1044,7 +1047,10 @@ func TestBuildMasqueInbound(t *testing.T) {
 	if ms["path"] != "/.well-known/masque/ip/" {
 		t.Fatalf("path: %v", ms["path"])
 	}
-	if ms["certificate"] != "CERT" || ms["key"] != "KEY" {
-		t.Fatalf("cert not inlined: %v", ms)
+	if ms["endpoint_key"] != "test-endpoint-key-pem" {
+		t.Fatalf("endpoint_key not passed through: %v", ms)
+	}
+	if _, hasCert := ms["certificate"]; hasCert {
+		t.Fatalf("cert_config cert must not be inlined for masque: %v", ms)
 	}
 }
