@@ -30,6 +30,10 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 		return err
 	}
 
+	if err := validateMasque(n); err != nil {
+		return err
+	}
+
 	if len(n.CustomOutbounds) > MaxCustomOutbounds {
 		return fmt.Errorf("custom_outbounds exceeds max %d (got %d)", MaxCustomOutbounds, len(n.CustomOutbounds))
 	}
@@ -55,8 +59,22 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	return nil
 }
 
-// validateHysteriaListenPorts checks optional Hy2 multi-port listen range.
-// Empty is fine (single server_port). Invalid ranges or spans > 1024 fail.
+// validateMasque checks dual-mode requirements: an ECDSA P-256 endpoint
+// private key (PEM) to serve the QUIC TLS certificate that usque clients
+// pin (and sing-box clients skip-verifying), plus at least one tunnel
+// prefix for static-IP validation.
+func validateMasque(n *NodeSpec) error {
+	if !strings.EqualFold(n.Protocol, "masque") {
+		return nil
+	}
+	if strings.TrimSpace(n.MasqueEndpointPrivateKey) == "" {
+		return fmt.Errorf("masque requires endpoint private key (masque_endpoint_private_key)")
+	}
+	if len(n.MasqueAddresses) == 0 {
+		return fmt.Errorf("masque requires at least one tunnel address (masque_addresses)")
+	}
+	return nil
+}
 func validateHysteriaListenPorts(n *NodeSpec) error {
 	raw := strings.TrimSpace(n.ListenPorts)
 	if raw == "" {

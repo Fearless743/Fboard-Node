@@ -68,13 +68,17 @@ type NodeSpec struct {
 	TrustTunnelDNSUpstreams        []string
 	TrustTunnelSkipVerification    bool
 
-	// MASQUE (Xray proxy/masque: RFC 9484 CONNECT-IP over HTTP/3 + QUIC)
+	// MASQUE (Xray proxy/masque: CONNECT-IP over HTTP/3 + QUIC, dual-mode:
+	// sing-box Basic auth + usque/mihomo ECDSA device-cert auth)
 	MasqueAddresses       []string
 	MasqueAdvertiseRoutes []string
 	MasquePath            string
 	MasqueMTU             int
 	MasqueServerName      string
 	MasqueAllowInsecure   bool
+	// MasqueEndpointPrivateKey is the PEM-encoded ECDSA P-256 endpoint key
+	// (usque architecture: pinned by clients, self-signed server cert).
+	MasqueEndpointPrivateKey string
 
 	Multiplex           *MultiplexConfig
 	AcceptProxyProtocol bool
