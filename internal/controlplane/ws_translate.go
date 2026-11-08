@@ -11,7 +11,7 @@ import (
 // TranslateWSEvent converts a panel WebSocket event into the controlplane Event
 // shape used by Service / NodeMailbox.
 func TranslateWSEvent(event panel.WSEvent, kcfg config.KernelConfig) (Event, error) {
-	translated := Event{Type: EventType(event.Type), DeltaAction: event.DeltaAction, DeviceUsers: event.DeviceUsers}
+	translated := Event{Type: EventType(event.Type), DeltaAction: event.DeltaAction, DeviceUsers: event.DeviceUsers, UpgradeChecksum: event.UpgradeChecksum}
 	if event.Config != nil {
 		var err error
 		translated.Config, err = model.NodeSpecFromPanelValidated(event.Config, kcfg)

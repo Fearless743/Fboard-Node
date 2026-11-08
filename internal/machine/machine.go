@@ -389,7 +389,7 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 		return
 
 	case panel.WSEventSyncUpgrade:
-		o.handleRemoteUpgrade(event.DeltaAction)
+		o.handleRemoteUpgrade(event.DeltaAction, event.UpgradeChecksum)
 		return
 
 	case panel.WSEventSyncKernel:
@@ -472,9 +472,27 @@ func restartService(sys opsutil.InitSystem) error {
 //     replaces this one. If no manager is registered, falls back to spawning
 //     a detached copy of ourselves and exiting.
 //   - Sends WS ops ack to the panel (best-effort) with `ok`/`failed` + detail.
-func (o *Orchestrator) handleRemoteUpgrade(version string) {
+func (o *Orchestrator) handleRemoteUpgrade(version, checksum string) {
 	if version == "" {
 		version = "latest"
+	}
+	if err := opsutil.ValidateUpgradeVersion(version); err != nil {
+		o.log().Warn("remote upgrade rejected: invalid version", "error", err)
+		if o.ws != nil {
+			o.ws.SendOpAck("upgrade", "failed", err.Error())
+		}
+		return
+	}
+	checksum, err := opsutil.NormalizeChecksum(checksum)
+	if err != nil {
+		o.log().Warn("remote upgrade rejected: invalid checksum", "error", err)
+		if o.ws != nil {
+			o.ws.SendOpAck("upgrade", "failed", err.Error())
+		}
+		return
+	}
+	if checksum == "" {
+		o.log().Warn("remote upgrade without checksum: archive will not be verified")
 	}
 	o.log().Info("remote upgrade requested", "version", version)
 
@@ -492,7 +510,11 @@ func (o *Orchestrator) handleRemoteUpgrade(version string) {
 			return
 		}
 		o.log().Info("remote upgrade invoking fbctl", "path", fbctl, "version", version)
-		out, err := exec.Command(fbctl, "upgrade", "--version", version).CombinedOutput()
+		args := []string{"upgrade", "--version", version}
+		if checksum != "" {
+			args = append(args, "--checksum", checksum)
+		}
+		out, err := exec.Command(fbctl, args...).CombinedOutput()
 		if err != nil {
 			detail := strings.TrimSpace(string(out))
 			if detail == "" {

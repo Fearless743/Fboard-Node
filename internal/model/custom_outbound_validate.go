@@ -78,7 +78,7 @@ func validateOutboundSettings(index int, settings map[string]any) error {
 			return fmt.Errorf("custom_outbounds[%d].settings.%s is reserved", index, reservedKey)
 		}
 	}
-	for _, field := range []string{"server", "uuid", "password", "method", "cipher", "private_key", "secret_key", "privateKey", "secretKey"} {
+	for _, field := range []string{"server", "address", "uuid", "password", "method", "cipher", "private_key", "secret_key", "privateKey", "secretKey"} {
 		if value, ok := settings[field]; ok {
 			if strings.TrimSpace(fmt.Sprintf("%v", value)) == "" {
 				return fmt.Errorf("custom_outbounds[%d].settings.%s must not be blank", index, field)

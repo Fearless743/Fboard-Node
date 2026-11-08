@@ -709,12 +709,87 @@ func normalizeBaseURL(raw string) (string, string, error) {
 	return normalized, slug, nil
 }
 
+// validatePanelURL forces panel.url to use https, so machine tokens and user
+// traffic are never sent in cleartext. Plain http is only tolerated for
+// loopback development endpoints (127.0.0.1 / ::1 / localhost).
+func validatePanelURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("invalid panel.url %q", raw)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("panel.url must use https (got http for non-loopback host %q)", u.Hostname())
+	default:
+		return fmt.Errorf("panel.url must use https (got scheme %q)", u.Scheme)
+	}
+}
+
+// isLoopbackHost reports whether host is a loopback name or address.
+func isLoopbackHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	switch h {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
+}
+
+// certFileAllowBase is the only absolute directory panel-supplied (or ECH)
+// certificate/key paths may point into.
+const certFileAllowBase = "/etc/fboard/certs"
+
+// ValidateCertFilePath whitelists a certificate/key file path:
+//
+//   - absolute paths must live under /etc/fboard/certs/;
+//   - relative paths are resolved against configDir (the directory holding
+//     config.yml) and must stay inside it;
+//   - any ".." path element is rejected outright.
+//
+// configDir is typically Kernel.ConfigDir, which defaults to the config file's
+// directory. An empty configDir resolves relatives against ".".
+func ValidateCertFilePath(p, configDir string) error {
+	if strings.TrimSpace(p) == "" {
+		return fmt.Errorf("cert file path is empty")
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(p), "/") {
+		if seg == ".." {
+			return fmt.Errorf("cert file path %q must not contain \"..\"", p)
+		}
+	}
+	clean := filepath.Clean(p)
+	if filepath.IsAbs(clean) {
+		base := filepath.Clean(certFileAllowBase)
+		if clean == base || strings.HasPrefix(clean, base+string(os.PathSeparator)) {
+			return nil
+		}
+		return fmt.Errorf("cert file path %q: absolute paths must be under %s/", p, base)
+	}
+	base := configDir
+	if base == "" {
+		base = "."
+	}
+	resolved := filepath.Clean(filepath.Join(base, clean))
+	if resolved == filepath.Clean(base) || strings.HasPrefix(resolved, filepath.Clean(base)+string(os.PathSeparator)) {
+		return nil
+	}
+	return fmt.Errorf("cert file path %q escapes config dir %q", p, base)
+}
+
 func (c *Config) validate() error {
 	if !c.IsMachineMode() {
 		return fmt.Errorf("machine mode is required; %s", removedModesHint)
 	}
 	if c.Panel.URL == "" {
 		return fmt.Errorf("panel.url is required")
+	}
+	if err := validatePanelURL(c.Panel.URL); err != nil {
+		return err
 	}
 	if c.Machine.Token == "" {
 		return fmt.Errorf("machine.token is required")

@@ -24,6 +24,9 @@ type Event struct {
 	DeltaAction string
 	DeltaUsers  []model.UserSpec
 	DeviceUsers map[int][]string
+	// UpgradeChecksum is the optional panel-supplied sha256 of the release
+	// archive for sync.upgrade (empty = panel did not send one).
+	UpgradeChecksum string
 }
 
 type StatusChange struct {

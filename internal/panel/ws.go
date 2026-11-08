@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"net/url"
 	"strconv"
 	"sync/atomic"
@@ -43,6 +44,9 @@ type WSEvent struct {
 
 	// Machine node discovery fields (for sync.nodes)
 	Nodes []MachineNode
+
+	// Remote upgrade fields (for sync.upgrade)
+	UpgradeChecksum string // optional sha256 of the release archive
 
 	// Log pull request (for sync.logs)
 	LogLimit int
@@ -91,6 +95,7 @@ type syncDevicesPayload struct {
 // syncUpgradePayload carries version info for remote upgrade.
 type syncUpgradePayload struct {
 	Version   string `json:"version"`
+	Checksum  string `json:"checksum,omitempty"` // optional sha256 of release archive
 	Timestamp int64  `json:"timestamp"`
 	NodeID    int    `json:"node_id"`
 }
@@ -137,8 +142,9 @@ type WSClientConfig struct {
 }
 
 // WSClient connects to the panel's Workerman WS server using native WebSocket.
-// Authentication is done via query parameters (token + machine_id) during the
-// WebSocket handshake — no separate auth step needed. Per-node events carry node_id.
+// Authentication is sent primarily via the Authorization: Bearer header;
+// the token query parameter is retained only as a fallback for older panels.
+// Per-node events carry node_id.
 type WSClient struct {
 	wsURL    string // base WS URL, e.g. ws://panel.example.com:8076
 	token    string
@@ -246,16 +252,24 @@ func (w *WSClient) connect(ctx context.Context) error {
 		return fmt.Errorf("parse ws url: %w", err)
 	}
 	q := u.Query()
+	// Query token is kept only as a fallback for panels that predate
+	// Authorization-header auth; the Bearer header below is the primary
+	// channel. machine_id routing is not secret.
 	q.Set("token", w.token)
 	q.Set("machine_id", strconv.Itoa(w.cfg.MachineID))
 	u.RawQuery = q.Encode()
 
-	nlog.Core().Debug("ws connecting", "url", u.String())
+	// Never log the full URL: RawQuery carries the fallback token.
+	nlog.Core().Debug("ws connecting", "host", u.Host, "path", u.Path)
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: w.cfg.HandshakeTimeout,
 	}
-	conn, _, err := dialer.DialContext(ctx, u.String(), nil)
+	header := http.Header{}
+	if w.token != "" {
+		header.Set("Authorization", "Bearer "+w.token)
+	}
+	conn, _, err := dialer.DialContext(ctx, u.String(), header)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -503,6 +517,7 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 			return
 		}
 		event.DeltaAction = p.Version
+		event.UpgradeChecksum = p.Checksum
 
 	case WSEventSyncRestart:
 		nlog.Core().Info("ws remote restart event received (legacy; mapped to kernel restart)")
