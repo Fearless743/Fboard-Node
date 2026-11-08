@@ -160,6 +160,14 @@ func TestXraySetSpeedLimitFuncUsesPatchedCorePath(t *testing.T) {
 	if mu.Level != 0 {
 		t.Fatalf("MemoryUser.Level = %d, want 0", mu.Level)
 	}
+
+	ttMu, err := toMemoryUser("trusttunnel", &model.NodeSpec{Protocol: "trusttunnel"}, model.UserSpec{ID: 2, UUID: "22222222-2222-2222-2222-222222222222"})
+	if err != nil {
+		t.Fatalf("toMemoryUser(trusttunnel) error = %v", err)
+	}
+	if ttMu.Email != "user@2" {
+		t.Fatalf("MemoryUser.Email = %s, want user@2", ttMu.Email)
+	}
 }
 
 

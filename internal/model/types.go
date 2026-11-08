@@ -57,11 +57,16 @@ type NodeSpec struct {
 	// Sudoku
 	SudokuConfig *SudokuConfig
 
-	// TrustTunnel
-	TrustTunnelNetwork              []string
-	TrustTunnelCongestionController string
-	TrustTunnelCWND                 int
-	TrustTunnelBBRProfile           string
+	// TrustTunnel (Xray proxy/trusttunnel: HTTP/1.1 + HTTP/2 CONNECT, Basic auth)
+	TrustTunnelHostname            string
+	TrustTunnelUpstreamProtocol    string
+	TrustTunnelCustomSNI           string
+	TrustTunnelHasIPv6             bool
+	TrustTunnelAntiDPI             bool
+	TrustTunnelClientRandomPrefix  string
+	TrustTunnelClientRandomAuthKey string
+	TrustTunnelDNSUpstreams        []string
+	TrustTunnelSkipVerification    bool
 
 	Multiplex           *MultiplexConfig
 	AcceptProxyProtocol bool
