@@ -119,7 +119,7 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	} else {
 		nlog.Core().Warn("xray: unsupported protocol, no inbound configured",
 			"protocol", nc.Protocol,
-			"supported", "vmess, vless, trojan, shadowsocks, hysteria, socks, http, tuic, anytls, naive, mieru, shadowquic, sudoku")
+			"supported", "vmess, vless, trojan, shadowsocks, hysteria, socks, http, tuic, anytls, naive, mieru, shadowquic, sudoku, trusttunnel")
 	}
 
 	// Merge panel routes and static config routes
@@ -407,6 +407,8 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 		return buildShadowQUIC(base, nc, users)
 	case "sudoku":
 		return buildSudoku(base, nc, users)
+	case "trusttunnel":
+		return buildTrustTunnel(base, nc, users, tc)
 	default:
 		return nil
 	}
@@ -925,7 +927,7 @@ func buildRouting(rules []model.RouteRule, customRouteRules []model.CustomRouteR
 
 	xrayRules = append(xrayRules, M{
 		"type":        "field",
-		"ip":           privateIPCidrs,
+		"ip":          privateIPCidrs,
 		"outboundTag": "block",
 	})
 
@@ -1109,7 +1111,6 @@ func extractECHServerKeys(tlsSettings map[string]interface{}) string {
 
 	return echPEMToBase64(pemData)
 }
-
 
 // normalizeRealityKey re-encodes an X25519 REALITY key as base64.RawURLEncoding
 // (no padding, URL-safe alphabet). Accepts standard Base64, RawStd, RawURL, or
@@ -1300,8 +1301,6 @@ func buildNaive(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
 	return base
 }
 
-
-
 func buildMieru(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	// Official mieru uses username+password; Fboard uses UUID for both.
 	clients := make([]M, 0, len(users))
@@ -1431,5 +1430,43 @@ func buildSudoku(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	base["settings"] = settings
 	// Sudoku owns its own HTTPMask; use plain TCP stream under Xray.
 	base["streamSettings"] = M{"network": "tcp"}
+	return base
+}
+
+func buildTrustTunnel(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+	// Fboard maps both username and password to the user UUID (same as
+	// shadowquic/mieru); the proxy authenticates by password.
+	clients := make([]M, 0, len(users))
+	for _, u := range users {
+		clients = append(clients, M{
+			"username": u.UUID,
+			"password": u.UUID,
+			"email":    userEmail(u.ID),
+		})
+	}
+	base["settings"] = M{"clients": clients}
+	// TrustTunnel always runs over TLS (spec mandates certificate
+	// verification; self-signed is allowed with client skip_verification).
+	nc.TLS = 1
+	if nc.ServerName == "" {
+		if nc.TrustTunnelHostname != "" {
+			nc.ServerName = nc.TrustTunnelHostname
+		} else if nc.Host != "" {
+			nc.ServerName = nc.Host
+		}
+	}
+	// Ensure H2 is negotiated (official clients default to HTTP/2);
+	// http/1.1 stays as fallback for older clients.
+	if nc.TLSSettings == nil {
+		nc.TLSSettings = map[string]interface{}{"alpn": []string{"h2", "http/1.1"}}
+	} else if _, ok := nc.TLSSettings["alpn"]; !ok {
+		nc.TLSSettings["alpn"] = []string{"h2", "http/1.1"}
+	}
+	applyStreamSettings(base, nc, tc)
+	if ss, ok := base["streamSettings"].(M); ok {
+		if sec, ok := ss["security"].(string); !ok || sec != "tls" {
+			nlog.Core().Warn("trusttunnel requires TLS certificate; configure cert_mode (self, file, http, dns, or content)")
+		}
+	}
 	return base
 }

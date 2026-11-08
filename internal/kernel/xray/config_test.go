@@ -182,6 +182,15 @@ func TestBuildConfig_AllProtocols_ValidJSON(t *testing.T) {
 				ALPN:        []string{"h3"},
 			},
 		},
+		{
+			name: "trusttunnel",
+			nc: panel.NodeConfig{
+				Protocol:                    "trusttunnel",
+				ServerPort:                  443,
+				TrustTunnelHostname:         "vpn.example.com",
+				TrustTunnelUpstreamProtocol: "http2",
+			},
+		},
 	}
 
 	for _, tc := range protocols {
@@ -784,14 +793,55 @@ func TestBuildShadowQUICInbound(t *testing.T) {
 	}
 }
 
+func TestBuildTrustTunnelInbound(t *testing.T) {
+	nc := &model.NodeSpec{
+		Protocol:                    "trusttunnel",
+		ServerPort:                  443,
+		TrustTunnelHostname:         "vpn.example.com",
+		TrustTunnelUpstreamProtocol: "http2",
+	}
+	users := []model.UserSpec{{ID: 7, UUID: "11111111-1111-1111-1111-111111111111"}}
+	tc := kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")}
+	in := buildInbound(nc, users, tc)
+	if in == nil {
+		t.Fatal("expected trusttunnel inbound")
+	}
+	if in["protocol"] != "trusttunnel" {
+		t.Fatalf("protocol: %v", in["protocol"])
+	}
+	settings := in["settings"].(M)
+	clients := settings["clients"].([]M)
+	if len(clients) != 1 || clients[0]["username"] != users[0].UUID || clients[0]["password"] != users[0].UUID {
+		t.Fatalf("clients: %#v", clients)
+	}
+	if clients[0]["email"] != "user@7" {
+		t.Fatalf("email: %v", clients[0]["email"])
+	}
+	ss := in["streamSettings"].(M)
+	if ss["network"] != "tcp" {
+		t.Fatalf("network: %v", ss["network"])
+	}
+	if ss["security"] != "tls" {
+		t.Fatalf("security: %v", ss["security"])
+	}
+	tlsSettings := ss["tlsSettings"].(M)
+	if tlsSettings["serverName"] != "vpn.example.com" {
+		t.Fatalf("serverName: %v", tlsSettings["serverName"])
+	}
+	alpn, ok := tlsSettings["alpn"].([]string)
+	if !ok || len(alpn) == 0 || alpn[0] != "h2" {
+		t.Fatalf("alpn: %v", tlsSettings["alpn"])
+	}
+}
+
 func TestNormalizeRealityKey(t *testing.T) {
 	raw := make([]byte, 32)
 	for i := range raw {
 		raw[i] = byte(i)
 	}
-	std := base64.StdEncoding.EncodeToString(raw)      // may contain +/ and =
-	url := base64.RawURLEncoding.EncodeToString(raw)   // expected form
-	urlPad := base64.URLEncoding.EncodeToString(raw)   // URL alphabet + padding
+	std := base64.StdEncoding.EncodeToString(raw)    // may contain +/ and =
+	url := base64.RawURLEncoding.EncodeToString(raw) // expected form
+	urlPad := base64.URLEncoding.EncodeToString(raw) // URL alphabet + padding
 
 	cases := []struct {
 		name  string

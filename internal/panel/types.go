@@ -71,8 +71,8 @@ type MachineNode struct {
 
 // MachineNodesResponse is the response from GET /api/v2/server/machine/nodes.
 type MachineNodesResponse struct {
-	Nodes      []MachineNode      `json:"nodes"`
-	BaseConfig MachineBaseConfig  `json:"base_config"`
+	Nodes      []MachineNode     `json:"nodes"`
+	BaseConfig MachineBaseConfig `json:"base_config"`
 }
 
 // MachineBaseConfig holds polling intervals for machine mode.
@@ -158,11 +158,16 @@ type NodeConfig struct {
 	// Sudoku
 	SudokuConfig *SudokuConfig `json:"sudoku_config,omitempty"`
 
-	// TrustTunnel
-	TrustTunnelNetwork              []string `json:"trusttunnel_network,omitempty"`
-	TrustTunnelCongestionController string   `json:"trusttunnel_congestion_controller,omitempty"`
-	TrustTunnelCWND                 int      `json:"trusttunnel_cwnd,omitempty"`
-	TrustTunnelBBRProfile           string   `json:"trusttunnel_bbr_profile,omitempty"`
+	// TrustTunnel (Xray proxy/trusttunnel: HTTP/1.1 + HTTP/2 CONNECT, Basic auth)
+	TrustTunnelHostname            string   `json:"trusttunnel_hostname,omitempty"`
+	TrustTunnelUpstreamProtocol    string   `json:"trusttunnel_upstream_protocol,omitempty"`
+	TrustTunnelCustomSNI           string   `json:"trusttunnel_custom_sni,omitempty"`
+	TrustTunnelHasIPv6             bool     `json:"trusttunnel_has_ipv6,omitempty"`
+	TrustTunnelAntiDPI             bool     `json:"trusttunnel_anti_dpi,omitempty"`
+	TrustTunnelClientRandomPrefix  string   `json:"trusttunnel_client_random_prefix,omitempty"`
+	TrustTunnelClientRandomAuthKey string   `json:"trusttunnel_client_random_auth_key,omitempty"`
+	TrustTunnelDNSUpstreams        []string `json:"trusttunnel_dns_upstreams,omitempty"`
+	TrustTunnelSkipVerification    bool     `json:"trusttunnel_skip_verification,omitempty"`
 
 	// Multiplex
 	Multiplex *MultiplexConfig `json:"multiplex,omitempty"`

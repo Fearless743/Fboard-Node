@@ -15,33 +15,33 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/uuid"
 	xrayCore "github.com/xtls/xray-core/core"
+	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/features/stats"
-	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/infra/conf/serial"
 	xrayProxy "github.com/xtls/xray-core/proxy"
-	"github.com/xtls/xray-core/proxy/shadowsocks"
-	ss2022 "github.com/xtls/xray-core/proxy/shadowsocks_2022"
-	"github.com/xtls/xray-core/proxy/trojan"
-	"github.com/xtls/xray-core/proxy/vless"
-	"github.com/xtls/xray-core/proxy/vmess"
-	tuicAccount "github.com/xtls/xray-core/proxy/tuic/account"
 	anytlsproxy "github.com/xtls/xray-core/proxy/anytls"
 	hysteriaAccount "github.com/xtls/xray-core/proxy/hysteria/account"
-	naiveAccount "github.com/xtls/xray-core/proxy/naive/account"
 	mieruAccount "github.com/xtls/xray-core/proxy/mieru/account"
+	naiveAccount "github.com/xtls/xray-core/proxy/naive/account"
 	sqAccount "github.com/xtls/xray-core/proxy/shadowquic/account"
+	"github.com/xtls/xray-core/proxy/shadowsocks"
+	ss2022 "github.com/xtls/xray-core/proxy/shadowsocks_2022"
 	sudokuproxy "github.com/xtls/xray-core/proxy/sudoku"
+	"github.com/xtls/xray-core/proxy/trojan"
+	ttAccount "github.com/xtls/xray-core/proxy/trusttunnel/account"
+	tuicAccount "github.com/xtls/xray-core/proxy/tuic/account"
+	"github.com/xtls/xray-core/proxy/vless"
+	"github.com/xtls/xray-core/proxy/vmess"
 	"golang.org/x/time/rate"
-
 
 	_ "github.com/xtls/xray-core/main/distro/all"
 
 	"github.com/fearless743/fboard-node/internal/config"
 	"github.com/fearless743/fboard-node/internal/kernel"
 	"github.com/fearless743/fboard-node/internal/kernel/geodata"
-	"github.com/fearless743/fboard-node/internal/nlog"
 	"github.com/fearless743/fboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/nlog"
 )
 
 const (
@@ -106,7 +106,7 @@ func (x *Xray) Protocols() []string {
 	return []string{
 		"vmess", "vless", "trojan", "shadowsocks",
 		"hysteria", "socks", "http",
-		"tuic", "anytls", "naive", "mieru", "shadowquic", "sudoku",
+		"tuic", "anytls", "naive", "mieru", "shadowquic", "sudoku", "trusttunnel",
 	}
 }
 
@@ -662,6 +662,11 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
 			return nil, fmt.Errorf("sudoku user hash: %w", err)
 		}
 		mu.Account = &sudokuproxy.MemoryAccount{PrivateKey: u.UUID, UserHash: hash}
+
+	case "trusttunnel":
+		// Username and password are both the user UUID (panel convention);
+		// the proxy authenticates by password.
+		mu.Account = &ttAccount.MemoryAccount{Username: u.UUID, Password: u.UUID}
 
 	default:
 		return nil, fmt.Errorf("protocol %q does not support MemoryUser", proto)
