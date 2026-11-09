@@ -1322,6 +1322,9 @@ func buildMieru(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	if nc.TrafficPattern != "" {
 		settings["traffic_pattern"] = nc.TrafficPattern
 	}
+	if nc.Multiplexing != "" {
+		settings["multiplexing"] = nc.Multiplexing
+	}
 	base["settings"] = settings
 	// Official mieru transport owns the listen socket.
 	base["streamSettings"] = M{
@@ -1329,6 +1332,7 @@ func buildMieru(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 		"mieruSettings": M{
 			"transport":      transport,
 			"trafficPattern": nc.TrafficPattern,
+			"multiplexing":   nc.Multiplexing,
 		},
 	}
 	return base

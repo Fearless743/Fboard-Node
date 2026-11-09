@@ -146,6 +146,7 @@ type NodeConfig struct {
 	// Mieru
 	Transport      string `json:"transport,omitempty"`
 	TrafficPattern string `json:"traffic_pattern,omitempty"`
+	Multiplexing   string `json:"multiplexing,omitempty"`
 
 	// ShadowQUIC
 	// JLSUpstream is the camouflage target (host:port), required by the protocol.
