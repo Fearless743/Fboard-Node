@@ -229,6 +229,8 @@ type SudokuConfig struct {
 	CustomTables       []string `json:"custom_tables,omitempty"`
 	DisableHTTPMask    bool     `json:"disable_http_mask,omitempty"`
 	HTTPMaskMode       string   `json:"http_mask_mode,omitempty"`
+	HTTPMaskTLS        *bool    `json:"http_mask_tls,omitempty"`
+	HTTPMaskHost       string   `json:"http_mask_host,omitempty"`
 	PathRoot           string   `json:"path_root,omitempty"`
 	Fallback           string   `json:"fallback,omitempty"`
 	Multiplex          string   `json:"multiplex,omitempty"` // off|auto|on

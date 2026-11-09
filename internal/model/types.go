@@ -126,6 +126,8 @@ type SudokuConfig struct {
 	CustomTables       []string
 	DisableHTTPMask    bool
 	HTTPMaskMode       string
+	HTTPMaskTLS        *bool
+	HTTPMaskHost       string
 	PathRoot           string
 	Fallback           string
 	Multiplex          string // off|auto|on

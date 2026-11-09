@@ -1423,6 +1423,12 @@ func buildSudoku(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 		if sc.HTTPMaskMode != "" {
 			settings["http_mask_mode"] = sc.HTTPMaskMode
 		}
+		if sc.HTTPMaskTLS != nil {
+			settings["http_mask_tls"] = *sc.HTTPMaskTLS
+		}
+		if sc.HTTPMaskHost != "" {
+			settings["http_mask_host"] = sc.HTTPMaskHost
+		}
 		if sc.PathRoot != "" {
 			settings["path_root"] = sc.PathRoot
 		}
