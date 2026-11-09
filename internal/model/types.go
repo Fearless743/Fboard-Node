@@ -48,6 +48,7 @@ type NodeSpec struct {
 	PaddingScheme     string
 	Transport         string
 	TrafficPattern    string
+	Multiplexing      string
 
 	// ShadowQUIC
 	JLSUpstream string
