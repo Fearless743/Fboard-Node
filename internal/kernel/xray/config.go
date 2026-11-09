@@ -406,7 +406,7 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 	case "shadowquic":
 		return buildShadowQUIC(base, nc, users)
 	case "sudoku":
-		return buildSudoku(base, nc, users)
+		return buildSudoku(base, nc, users, tc)
 	case "trusttunnel":
 		return buildTrustTunnel(base, nc, users, tc)
 	case "masque":
@@ -1378,7 +1378,7 @@ func buildShadowQUIC(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	return base
 }
 
-func buildSudoku(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+func buildSudoku(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
 	// Server key = Master Public Key (from panel server_key).
 	// Client private key is carried in UserSpec.UUID (panel writes available private key there for sudoku).
 	clients := make([]M, 0, len(users))
@@ -1440,8 +1440,20 @@ func buildSudoku(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 		}
 	}
 	base["settings"] = settings
-	// Sudoku owns its own HTTPMask; use plain TCP stream under Xray.
-	base["streamSettings"] = M{"network": "tcp"}
+	// Sudoku owns its own HTTPMask; use TCP under Xray. When a TLS certificate
+	// is available (panel cert_mode != none), enable TLS on the transport so
+	// the origin can satisfy Cloudflare Full mode without an external terminator.
+	ss := M{"network": "tcp"}
+	if tc.HasCert() {
+		tlsSettings := M{}
+		tlsSettings["certificates"] = []M{{
+			"certificate": []string{string(tc.CertPEM)},
+			"key":         []string{string(tc.KeyPEM)},
+		}}
+		ss["security"] = "tls"
+		ss["tlsSettings"] = tlsSettings
+	}
+	base["streamSettings"] = ss
 	return base
 }
 
