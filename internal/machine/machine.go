@@ -136,9 +136,16 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	o.mu.Lock()
-	if _, exists := o.nodes[mn.ID]; exists {
-		o.mu.Unlock()
-		return
+	// A stale handle left behind by a crashed/exited node service must not
+	// block rediscovery from restarting it. Drop it and fall through.
+	if h, exists := o.nodes[mn.ID]; exists {
+		select {
+		case <-h.done:
+			delete(o.nodes, mn.ID)
+		default:
+			o.mu.Unlock()
+			return
+		}
 	}
 
 	nodeCtx, cancel := context.WithCancel(ctx)
@@ -207,6 +214,7 @@ func (o *Orchestrator) stopNode(nodeID int) {
 
 	o.eventsMu.Lock()
 	delete(o.mailboxes, nodeID)
+	delete(o.statuses, nodeID)
 	o.eventsMu.Unlock()
 
 	o.log().Info(fmt.Sprintf("machine: stopping node %d", nodeID))
@@ -261,6 +269,22 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 	for _, id := range toRemove {
 		o.stopNode(id)
 	}
+
+	// Clean up any orphaned mailbox/status entries for nodes that are no
+	// longer part of this machine (e.g. after a crashed service exited
+	// without unregistering, or a node that disappeared from the panel).
+	o.eventsMu.Lock()
+	for id := range o.mailboxes {
+		if _, ok := wanted[id]; !ok {
+			delete(o.mailboxes, id)
+		}
+	}
+	for id := range o.statuses {
+		if _, ok := wanted[id]; !ok {
+			delete(o.statuses, id)
+		}
+	}
+	o.eventsMu.Unlock()
 
 	for _, n := range nodesResp.Nodes {
 		o.startNode(ctx, n) // no-op if already running
@@ -660,6 +684,13 @@ func (o *Orchestrator) registerNode(nodeID int, st chan<- controlplane.StatusCha
 }
 
 func (o *Orchestrator) unregisterNode(nodeID int) {
+	// Drop the node handle so a later rediscover can restart it if it is still
+	// listed by the panel; otherwise stale entries keep dead nodes around and
+	// prevent non-existent ones from being cleaned up.
+	o.mu.Lock()
+	delete(o.nodes, nodeID)
+	o.mu.Unlock()
+
 	o.eventsMu.Lock()
 	delete(o.mailboxes, nodeID)
 	delete(o.statuses, nodeID)
