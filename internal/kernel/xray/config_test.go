@@ -1054,3 +1054,73 @@ func TestBuildMasqueInbound(t *testing.T) {
 		t.Fatalf("cert_config cert must not be inlined for masque: %v", ms)
 	}
 }
+
+// vless+ws+tls behind Cloudflare (cert_mode=none, no cert material on the
+// node): the origin must stay plaintext so the proxy's plain-WS origin pull
+// succeeds. Setting security=tls with an empty certificates list breaks every
+// handshake. Mirrors wyx2685/v2node (cert_mode none/"" skips TLS entirely).
+func TestBuildVLESS_WS_TLS_NoCert_PlaintextFallback(t *testing.T) {
+	nc := testNodeSpec(&panel.NodeConfig{
+		Protocol:   "vless",
+		ServerPort: 8080,
+		Network:    "ws",
+		TLS:        1,
+		NetworkSettings: map[string]interface{}{
+			"path": "/ws",
+			"headers": map[string]interface{}{
+				"Host": "cdn.example.com",
+			},
+		},
+	})
+	in := buildInbound(nc, testUsers, kernel.TLSCert{})
+	if in == nil {
+		t.Fatal("expected vless inbound")
+	}
+	ss := in["streamSettings"].(M)
+	if sec, ok := ss["security"]; ok && sec != "" && sec != "none" {
+		t.Fatalf("security must be absent/plaintext without cert, got: %v", sec)
+	}
+	if _, ok := ss["tlsSettings"]; ok {
+		t.Fatalf("tlsSettings must be absent without cert: %v", ss)
+	}
+	ws, ok := ss["wsSettings"].(M)
+	if !ok {
+		t.Fatalf("wsSettings missing: %v", ss)
+	}
+	if ws["path"] != "/ws" {
+		t.Fatalf("ws path lost in fallback: %v", ws)
+	}
+}
+
+func TestBuildVLESS_WS_TLS_WithCert_EnablesTLS(t *testing.T) {
+	nc := testNodeSpec(&panel.NodeConfig{
+		Protocol:   "vless",
+		ServerPort: 443,
+		Network:    "ws",
+		TLS:        1,
+		ServerName: "cdn.example.com",
+		NetworkSettings: map[string]interface{}{
+			"path": "/ws",
+			"headers": map[string]interface{}{
+				"Host": "cdn.example.com",
+			},
+		},
+	})
+	tc := kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")}
+	in := buildInbound(nc, testUsers, tc)
+	if in == nil {
+		t.Fatal("expected vless inbound")
+	}
+	ss := in["streamSettings"].(M)
+	if ss["security"] != "tls" {
+		t.Fatalf("security: %v", ss["security"])
+	}
+	tlsSettings, ok := ss["tlsSettings"].(M)
+	if !ok {
+		t.Fatalf("tlsSettings missing: %v", ss)
+	}
+	certs, ok := tlsSettings["certificates"].([]M)
+	if !ok || len(certs) != 1 {
+		t.Fatalf("certificates: %v", tlsSettings["certificates"])
+	}
+}
