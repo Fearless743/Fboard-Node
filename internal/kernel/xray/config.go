@@ -727,6 +727,16 @@ func applyStreamSettings(base M, nc *model.NodeSpec, tc kernel.TLSCert) {
 				wsSettings["headers"] = headers
 			}
 		}
+		if nc.NetworkSettings != nil {
+			if v, ok := nc.NetworkSettings["heartbeatPeriod"]; ok {
+				wsSettings["heartbeatPeriod"] = v
+			} else if v, ok := nc.NetworkSettings["heartbeat_period"]; ok {
+				wsSettings["heartbeatPeriod"] = v
+			}
+		}
+		if _, ok := wsSettings["heartbeatPeriod"]; !ok {
+			wsSettings["heartbeatPeriod"] = 30
+		}
 		ss["wsSettings"] = wsSettings
 
 	case "grpc":
