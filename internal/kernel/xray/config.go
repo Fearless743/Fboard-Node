@@ -818,53 +818,59 @@ func applyStreamSettings(base M, nc *model.NodeSpec, tc kernel.TLSCert) {
 
 	// TLS
 	if nc.TLS == 1 {
-		tlsSettings := M{}
-		serverName := nc.ServerName
-		if serverName == "" && nc.Host != "" {
-			serverName = nc.Host
-		}
-		if serverName != "" {
-			tlsSettings["serverName"] = serverName
-		}
-		if nc.TLSSettings != nil {
-			if sn, ok := nc.TLSSettings["server_name"]; ok && sn != "" {
-				tlsSettings["serverName"] = sn
+		if !tc.HasCert() {
+			// No certificate material on this node (e.g. cert_mode=none behind
+			// Cloudflare or another TLS-terminating reverse proxy): leave the
+			// inbound in plaintext so the proxy's plain origin pull succeeds.
+			// Setting security=tls with an empty certificates list would make
+			// every handshake fail (Go TLS server with no certificates).
+			// Mirrors wyx2685/v2node, where cert_mode none/"" skips TLS entirely.
+			nlog.Core().Warn("tls requested but no certificate available; running plaintext (expecting TLS termination upstream, e.g. Cloudflare)",
+				"protocol", nc.Protocol,
+				"network", network)
+		} else {
+			tlsSettings := M{}
+			serverName := nc.ServerName
+			if serverName == "" && nc.Host != "" {
+				serverName = nc.Host
 			}
-			// ALPN: pass through (e.g. h3 for VLESS-TLS-SplitHTTP-H3)
-			if v, ok := nc.TLSSettings["alpn"]; ok && v != nil {
-				switch a := v.(type) {
-				case []interface{}:
-					alpn := make([]string, 0, len(a))
-					for _, item := range a {
-						alpn = append(alpn, fmt.Sprintf("%v", item))
-					}
-					if len(alpn) > 0 {
-						tlsSettings["alpn"] = alpn
-					}
-				case []string:
-					if len(a) > 0 {
-						tlsSettings["alpn"] = a
+			if serverName != "" {
+				tlsSettings["serverName"] = serverName
+			}
+			if nc.TLSSettings != nil {
+				if sn, ok := nc.TLSSettings["server_name"]; ok && sn != "" {
+					tlsSettings["serverName"] = sn
+				}
+				// ALPN: pass through (e.g. h3 for VLESS-TLS-SplitHTTP-H3)
+				if v, ok := nc.TLSSettings["alpn"]; ok && v != nil {
+					switch a := v.(type) {
+					case []interface{}:
+						alpn := make([]string, 0, len(a))
+						for _, item := range a {
+							alpn = append(alpn, fmt.Sprintf("%v", item))
+						}
+						if len(alpn) > 0 {
+							tlsSettings["alpn"] = alpn
+						}
+					case []string:
+						if len(a) > 0 {
+							tlsSettings["alpn"] = a
+						}
 					}
 				}
+				// ECH server-side: extract key from tls_settings.ech
+				if echKeys := extractECHServerKeys(nc.TLSSettings); echKeys != "" {
+					tlsSettings["echServerKeys"] = echKeys
+				}
 			}
-			// ECH server-side: extract key from tls_settings.ech
-			if echKeys := extractECHServerKeys(nc.TLSSettings); echKeys != "" {
-				tlsSettings["echServerKeys"] = echKeys
-			}
-		}
-		if tc.HasCert() {
 			tlsCert := M{
 				"certificate": []string{string(tc.CertPEM)},
 				"key":         []string{string(tc.KeyPEM)},
 			}
 			tlsSettings["certificates"] = []M{tlsCert}
-		} else {
-			// Fallback placeholder for auto-TLS environments.
-			// Xray allows empty certificates array in more cases than other cores,
-			// but providing a placeholder helps documentation.
+			ss["security"] = "tls"
+			ss["tlsSettings"] = tlsSettings
 		}
-		ss["security"] = "tls"
-		ss["tlsSettings"] = tlsSettings
 	} else if nc.TLS == 2 {
 		ss["security"] = "reality"
 		ss["realitySettings"] = buildRealitySettings(nc)
