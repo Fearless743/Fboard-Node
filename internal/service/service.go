@@ -58,6 +58,11 @@ type Service struct {
 		Users  []model.UserSpec
 	}
 
+	// portClaim is this service's held listen-port claim in the process-wide
+	// registry (see portclaim.go). It guarantees no two nodes bind the same
+	// address:port, across instances and protocols.
+	portClaim *portClaim
+
 	pushInterval int // seconds
 	pullInterval int // seconds
 
@@ -237,7 +242,10 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.initialSetup(ctx); err != nil {
 		return fmt.Errorf("initial setup: %w", err)
 	}
-	defer s.kernel.Stop()
+	defer func() {
+		s.kernel.Stop()
+		s.releaseNodePort()
+	}()
 
 	// Set up tickers
 	trackTicker := time.NewTicker(time.Duration(s.cfg.Node.TrackInterval) * time.Second)
@@ -822,7 +830,17 @@ func (s *Service) restoreUserState(users []model.UserSpec, hash string) {
 // startKernel starts (or restarts) the kernel with the given config/users and
 // records the successfully applied state. Returns false on error.
 func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
+	// Refuse to bind an address already claimed by another node (any instance,
+	// any protocol) instead of sharing the socket or failing obscurely.
+	cl, err := claimPort(nc.ListenIP, nc.ServerPort, s.claimOwner(nc), s.portClaim)
+	if err != nil {
+		s.log().Error("refusing to start kernel: listen port conflict", "error", err)
+		return false
+	}
+	s.portClaim = cl
 	if err := s.kernel.Start(nc, users, s.cert.TLSCert()); err != nil {
+		// Kernel not running: hold no claim so a later retry re-evaluates.
+		s.releaseNodePort()
 		s.log().Error("failed to start kernel", "error", err)
 		return false
 	}
@@ -840,6 +858,41 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 	})
 	s.nodeLog.Info(fmt.Sprintf("started, %d users", len(users)))
 	return true
+}
+
+// claimOwner identifies this node service in port-conflict errors.
+func (s *Service) claimOwner(nc *model.NodeSpec) portOwner {
+	inst := ""
+	node := 0
+	if s.cfg != nil {
+		inst = s.cfg.InstanceID
+		node = s.cfg.Panel.NodeID
+	}
+	if inst == "" {
+		inst = fmt.Sprintf("machine-%d", s.machineID())
+	}
+	return portOwner{
+		instance: fmt.Sprintf("%s/node-%d", inst, node),
+		proto:    nc.Protocol,
+	}
+}
+
+// releaseNodePort drops this service's held listen-port claim, if any.
+func (s *Service) releaseNodePort() {
+	releasePort(s.portClaim)
+	s.portClaim = nil
+}
+
+// claimNodePortForReload validates the pending config against the port
+// registry before a kernel Reload. On conflict the reload is refused and the
+// currently running kernel is left untouched.
+func (s *Service) claimNodePortForReload(nc *model.NodeSpec) error {
+	cl, err := claimPort(nc.ListenIP, nc.ServerPort, s.claimOwner(nc), s.portClaim)
+	if err != nil {
+		return err
+	}
+	s.portClaim = cl
+	return nil
 }
 
 // ensureRunning starts the kernel if it is not running and there are users +
@@ -871,6 +924,7 @@ func (s *Service) ControlKernel(action string) error {
 		s.log().Info("remote kernel stop requested")
 		s.kernelDesired.Store(false)
 		s.kernel.Stop()
+		s.releaseNodePort()
 		s.appliedState.Config = nil
 		s.appliedState.Users = nil
 		s.log().Info("kernel stopped by remote ops")
@@ -917,6 +971,9 @@ func (s *Service) ControlKernel(action string) error {
 			}
 			s.log().Info("kernel started by remote ops (reload while stopped)")
 			return nil
+		}
+		if err := s.claimNodePortForReload(cfg); err != nil {
+			return fmt.Errorf("refusing kernel reload: %w", err)
 		}
 		if err := s.kernel.Reload(cfg, users, s.cert.TLSCert()); err != nil {
 			s.log().Warn("reload failed, forcing start", "error", err)
@@ -1130,6 +1187,7 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 	if s.lastConfig == nil || len(s.lastUsers) == 0 {
 		if len(s.lastUsers) == 0 {
 			s.kernel.Stop()
+			s.releaseNodePort()
 			s.appliedState.Users = nil
 		}
 		return
@@ -1143,6 +1201,10 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 	// If config changed, delegate to kernel.Reload. The kernel implementation
 	// decides whether to hot-swap users, reconstruct inbounds, or restart itself.
 	if configChanged && s.kernel.IsRunning() {
+		if err := s.claimNodePortForReload(s.lastConfig); err != nil {
+			s.log().Error("refusing kernel reload: listen port conflict, keeping previous config", "error", err)
+			return
+		}
 		if err := s.kernel.Reload(s.lastConfig, s.lastUsers, s.cert.TLSCert()); err != nil {
 			s.log().Warn(fmt.Sprintf("reload failed, restarting: %v", err))
 			s.startKernel(s.lastConfig, s.lastUsers)
