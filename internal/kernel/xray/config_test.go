@@ -766,6 +766,53 @@ func TestBuildSudokuInbound(t *testing.T) {
 	}
 }
 
+// sudoku behind Cloudflare (httpmask ws + tls:false, CF plaintext origin
+// pull): the inbound must stay plaintext TCP even when the node holds cert
+// material for other protocols. Enabling outer stream TLS here breaks both
+// the CDN's plain-HTTP origin pull and direct tls:false clients, since one
+// TCP port cannot serve TLS and non-TLS at once.
+func TestBuildSudoku_WithCert_StaysPlaintext(t *testing.T) {
+	httpMaskTLS := false
+	nc := &model.NodeSpec{
+		Protocol:   "sudoku",
+		ServerPort: 443,
+		ServerKey:  "aabbccdd",
+		SudokuConfig: &model.SudokuConfig{
+			AEADMethod:   "chacha20-poly1305",
+			HTTPMaskMode: "ws",
+			HTTPMaskTLS:  &httpMaskTLS,
+			HTTPMaskHost: "m1stb9eo.421895.xyz",
+			PathRoot:     "jxvJIrLU",
+		},
+	}
+	users := []model.UserSpec{{ID: 1, UUID: "deadbeef"}}
+	tc := kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")}
+	in := buildInbound(nc, users, tc)
+	if in == nil {
+		t.Fatal("expected sudoku inbound")
+	}
+	ss := in["streamSettings"].(M)
+	if ss["network"] != "tcp" {
+		t.Fatalf("network: %v", ss["network"])
+	}
+	if sec, ok := ss["security"]; ok && sec != "" && sec != "none" {
+		t.Fatalf("security must be absent/plaintext with cert, got: %v", sec)
+	}
+	if _, ok := ss["tlsSettings"]; ok {
+		t.Fatalf("tlsSettings must be absent with cert: %v", ss)
+	}
+	settings := in["settings"].(M)
+	if settings["http_mask_tls"] != false {
+		t.Fatalf("http_mask_tls: %v", settings["http_mask_tls"])
+	}
+	if settings["http_mask_host"] != "m1stb9eo.421895.xyz" {
+		t.Fatalf("http_mask_host: %v", settings["http_mask_host"])
+	}
+	if settings["path_root"] != "jxvJIrLU" {
+		t.Fatalf("path_root: %v", settings["path_root"])
+	}
+}
+
 func TestBuildShadowQUICInbound(t *testing.T) {
 	nc := &model.NodeSpec{
 		Protocol:          "shadowquic",
