@@ -245,9 +245,30 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	defer s.cert.Stop()
 
-	// Handshake: get WS config + initial data in one call
-	if err := s.initialSetup(ctx); err != nil {
-		return fmt.Errorf("initial setup: %w", err)
+	// Handshake: get WS config + initial data in one call.
+	// Transient panel failures (e.g. 429 / 5xx / network blips) must not
+	// kill the node permanently: retry with backoff until the panel recovers
+	// or the context is cancelled. This keeps a node that hit a rate-limit
+	// (or a temporary outage) during startup from staying down until the
+	// next discovery cycle.
+	setupBackoff := 2 * time.Second
+	for {
+		if err := s.initialSetup(ctx); err != nil {
+			s.log().Error("initial setup failed, retrying", "error", err, "retry_in", setupBackoff.String())
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(setupBackoff):
+			}
+			if setupBackoff < 30*time.Second {
+				setupBackoff *= 2
+				if setupBackoff > 30*time.Second {
+					setupBackoff = 30 * time.Second
+				}
+			}
+			continue
+		}
+		break
 	}
 	defer func() {
 		s.kernel.Stop()
