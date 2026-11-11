@@ -743,6 +743,13 @@ pidfile="/run/fboard-node.pid"
 output_log="/var/log/fboard-node.log"
 error_log="/var/log/fboard-node.log"
 
+# Stop schedule. OpenRC's default is SIGTERM/5, which is too tight for a
+# daemon that drains connections and pushes a final report on shutdown:
+# start-stop-daemon then aborts with "1 process refused to stop" and
+# `rc-service restart` / `fbctl upgrade` fail. Give the daemon 10s to exit
+# on SIGTERM and escalate to SIGKILL afterwards.
+retry="TERM/10/KILL/5"
+
 depend() {
     need net
     after firewall

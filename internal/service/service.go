@@ -30,6 +30,13 @@ import (
 	"github.com/fearless743/fboard-node/internal/tracker"
 )
 
+// finalReportTimeout bounds the best-effort final traffic report that is
+// pushed while shutting down. The panel HTTP client allows up to 30s per
+// request, which is far beyond the service manager's stop window (OpenRC
+// gives a daemon five seconds by default), so the report is abandoned when
+// it does not finish in time.
+const finalReportTimeout = 1500 * time.Millisecond
+
 type Service struct {
 	cfg          *config.Config
 	source       controlplane.Source
@@ -1290,6 +1297,12 @@ func (s *Service) pushReportAsync() {
 }
 
 // pushReportSync is used only during shutdown to ensure final data is sent.
+//
+// The report is best-effort: it is pushed through the panel HTTP client,
+// which allows up to 30s per request. Blocking the shutdown on that would
+// exceed the service manager's stop window (OpenRC allows 5s by default) and
+// make the service refuse to stop. The report therefore runs in the
+// background and is abandoned when it does not finish in time.
 func (s *Service) pushReportSync() {
 	if !s.sink.SupportsReporting() {
 		return
@@ -1301,8 +1314,18 @@ func (s *Service) pushReportSync() {
 	metrics := s.buildMetrics(status)
 	metrics["kernel_status"] = s.kernel.IsRunning()
 
-	if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
-		s.log().Warn("failed to push final report", "error", err)
+	done := make(chan error, 1)
+	go func() {
+		done <- s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			s.log().Warn("failed to push final report", "error", err)
+		}
+	case <-time.After(finalReportTimeout):
+		s.log().Warn("final report timed out, continuing shutdown", "timeout", finalReportTimeout)
 	}
 }
 

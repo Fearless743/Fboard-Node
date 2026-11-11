@@ -217,22 +217,37 @@ func IsActive(sys InitSystem, svcName string) bool {
 //   - systemd / openrc / sysvinit / supervisor / FreeBSD rc: `restart` verb.
 //   - launchd: unload + load the plist (no native restart; macOS launchd).
 //
-// Timeout is 8s for systemd (Manager=RestartSec latency) and 5s for the others.
+// Timeout is 8s for systemd (Manager=RestartSec latency) and 30s for the
+// others.
+//
+// The non-systemd managers get the larger budget because stopping a daemon
+// may take a while: OpenRC's stop schedule waits for the process to exit
+// (TERM/10 by default) before escalating to SIGKILL, and a systemd unit with
+// TimeoutStopSec can linger just as long. Cutting the command short would
+// leave the service half-stopped.
+//
+// systemd is dispatched with `--no-block`: `systemctl restart` blocks until
+// the unit has fully stopped, and the unit being restarted is usually *this*
+// process — the call would sit there waiting for us to die, hit the command
+// timeout and be reported as a failure, which pushed the callers into the
+// self-respawn fallback and left two daemon instances fighting over the same
+// ports. With --no-block systemd performs the restart in the background and
+// the command returns immediately.
 func RestartService(sys InitSystem, svcName string) error {
 	name := ManagerServiceName(sys, svcName)
 	switch sys {
 	case InitNone:
 		return ErrNoManager
 	case InitSystemd:
-		return runWithTimeout(8*time.Second, "systemctl", "restart", name+".service")
+		return runWithTimeout(8*time.Second, "systemctl", "restart", "--no-block", name+".service")
 	case InitOpenRC:
-		return runWithTimeout(5*time.Second, "rc-service", name, "restart")
+		return runWithTimeout(30*time.Second, "rc-service", name, "restart")
 	case InitRC:
-		return runWithTimeout(5*time.Second, serviceBin(), name, "restart")
+		return runWithTimeout(30*time.Second, serviceBin(), name, "restart")
 	case InitSysVInit:
-		return runWithTimeout(5*time.Second, "/etc/init.d/"+name, "restart")
+		return runWithTimeout(30*time.Second, "/etc/init.d/"+name, "restart")
 	case InitSupervisor:
-		return runWithTimeout(5*time.Second, "supervisorctl", "restart", name)
+		return runWithTimeout(30*time.Second, "supervisorctl", "restart", name)
 	case InitLaunchd:
 		// macOS plist location follows the convention used by install.sh.
 		plist := "/Library/LaunchDaemons/" + name + ".plist"

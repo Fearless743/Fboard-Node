@@ -48,7 +48,13 @@ import (
 const (
 	// drainTimeout is how long Stop waits for in-flight connections to finish
 	// before hard-killing the instance. Skipped during hot-reload for speed.
-	drainTimeout = 5 * time.Second
+	//
+	// It must stay small: the daemon has to exit within the service manager's
+	// stop window (OpenRC's default start-stop-daemon schedule is SIGTERM/5,
+	// i.e. five seconds for the whole shutdown). A longer drain makes
+	// `rc-service stop|restart` fail with "1 process refused to stop" and
+	// breaks `fbctl upgrade` on Alpine.
+	drainTimeout = 2 * time.Second
 	// startTimeout caps how long instance.Start() may block.
 	startTimeout = 30 * time.Second
 )

@@ -59,6 +59,17 @@ func main() {
 // panel never takes down sibling instances.
 const instanceRetryInterval = 30 * time.Second
 
+// shutdownTimeout bounds the whole shutdown sequence after the first
+// termination signal.
+//
+// It must stay below the service manager's stop window: OpenRC's default
+// start-stop-daemon schedule is SIGTERM/5, so a daemon that is still alive
+// five seconds after SIGTERM makes `rc-service stop|restart` fail with
+// "1 process refused to stop" (and `fbctl upgrade` roll back). When the
+// budget is exhausted the process exits anyway so the service can be
+// restarted.
+const shutdownTimeout = 4 * time.Second
+
 // runWithReload restarts all machine services when the config file changes.
 // Each machine instance is supervised independently: a panel-side failure in
 // one instance is logged and retried with backoff without cancelling the
@@ -131,8 +142,8 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 				case sig = <-sigCh:
 					nlog.Core().Warn("received second signal, forcing exit", "signal", sig)
 					os.Exit(1)
-				case <-time.After(15 * time.Second):
-					nlog.Core().Error("shutdown timed out after 15s, forcing exit")
+				case <-time.After(shutdownTimeout):
+					nlog.Core().Error("shutdown timed out, forcing exit", "timeout", shutdownTimeout)
 					os.Exit(2)
 				}
 			case <-ctx.Done():

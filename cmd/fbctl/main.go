@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -36,9 +37,22 @@ const (
 	rcServiceName          = "fboard_node" // FreeBSD rc.d (no hyphens)
 	systemdServiceFilePath = "/etc/systemd/system/fboard-node.service"
 	openrcInitScript       = "/etc/init.d/fboard-node"
+	openrcConfDir          = "/etc/conf.d"
+	openrcServiceConf      = "/etc/conf.d/fboard-node"
+	openrcPidFile          = "/run/fboard-node.pid"
 	freebsdRCScript        = "/usr/local/etc/rc.d/fboard_node"
 	defaultInstallRoot     = "/etc/fboard-node"
 	serviceLogFile         = "/var/log/fboard-node.log"
+
+	// openrcStopRetry is the OpenRC stop schedule used for fboard-node.
+	//
+	// OpenRC's default is SIGTERM/5: a daemon that is still alive five
+	// seconds after SIGTERM makes start-stop-daemon report
+	// "1 process refused to stop", so `rc-service stop|restart` (and
+	// therefore `fbctl upgrade`) fails. Ten seconds give the daemon room
+	// to drain connections and push its final report; SIGKILL is the
+	// fallback for a wedged process.
+	openrcStopRetry = "TERM/10/KILL/5"
 )
 
 // Set via ldflags at build time: -X main.downloadBase=...
@@ -95,19 +109,35 @@ func ensureFbctlSymlink() {
 	_ = os.Symlink(defaultCLIPath, "/usr/bin/fbctl")
 }
 
+// runPrivileged runs a service-manager command with root privileges.
+//
+// Alpine ships no `sudo` by default, so invoking `sudo <cmd>` on a stock
+// Alpine box fails with "executable file not found in $PATH". Run the
+// command directly when we are root already, use sudo when it exists, and
+// otherwise report a clear error.
+func runPrivileged(name string, args ...string) error {
+	if os.Geteuid() == 0 {
+		return runCommand(name, args...)
+	}
+	if _, err := exec.LookPath("sudo"); err == nil {
+		return runCommand("sudo", append([]string{name}, args...)...)
+	}
+	return fmt.Errorf("%s requires root privileges; run as root or install sudo", name)
+}
+
 // serviceCtl runs start|stop|restart|status via the detected init system.
 func serviceCtl(verb string, rest ...string) error {
 	name := managerServiceName()
 	switch initSystem() {
 	case "openrc":
-		return runCommand("sudo", append([]string{"rc-service", name, verb}, rest...)...)
+		return runPrivileged("rc-service", append([]string{name, verb}, rest...)...)
 	case "rc":
-		return runCommand("sudo", append([]string{"service", name, verb}, rest...)...)
+		return runPrivileged("service", append([]string{name, verb}, rest...)...)
 	default:
 		if verb == "status" {
-			return runCommand("sudo", append([]string{"systemctl", "status", name + ".service", "--no-pager"}, rest...)...)
+			return runPrivileged("systemctl", append([]string{"status", name + ".service", "--no-pager"}, rest...)...)
 		}
-		return runCommand("sudo", append([]string{"systemctl", verb, name}, rest...)...)
+		return runPrivileged("systemctl", append([]string{verb, name}, rest...)...)
 	}
 }
 
@@ -115,11 +145,11 @@ func serviceEnable() error {
 	name := managerServiceName()
 	switch initSystem() {
 	case "openrc":
-		return runCommand("sudo", "rc-update", "add", name, "default")
+		return runPrivileged("rc-update", "add", name, "default")
 	case "rc":
-		return runCommand("sudo", "sysrc", name+"_enable=YES")
+		return runPrivileged("sysrc", name+"_enable=YES")
 	default:
-		return runCommand("sudo", "systemctl", "enable", name)
+		return runPrivileged("systemctl", "enable", name)
 	}
 }
 
@@ -127,11 +157,11 @@ func serviceDisable() error {
 	name := managerServiceName()
 	switch initSystem() {
 	case "openrc":
-		return runCommand("sudo", "rc-update", "del", name, "default")
+		return runPrivileged("rc-update", "del", name, "default")
 	case "rc":
-		return runCommand("sudo", "sysrc", name+"_enable=NO")
+		return runPrivileged("sysrc", name+"_enable=NO")
 	default:
-		return runCommand("sudo", "systemctl", "disable", name)
+		return runPrivileged("systemctl", "disable", name)
 	}
 }
 
@@ -146,6 +176,129 @@ func serviceRestartNoSudo() error {
 	default:
 		return runCommand("systemctl", "restart", name)
 	}
+}
+
+// ensureOpenRCStopRetry makes sure the OpenRC service stops with a schedule
+// that gives the daemon enough time to exit.
+//
+// OpenRC's default stop schedule is SIGTERM/5. A daemon that is still alive
+// five seconds after SIGTERM makes start-stop-daemon abort with
+// "1 process refused to stop", which breaks `rc-service stop|restart` and
+// with it `fbctl upgrade`.
+//
+// The schedule is written to /etc/conf.d/<service> (the documented OpenRC
+// place for per-service overrides) so nodes that were installed before this
+// fix are repaired without touching their init script. Any other content of
+// that file is preserved.
+func ensureOpenRCStopRetry() error {
+	if initSystem() != "openrc" {
+		return nil
+	}
+	if err := os.MkdirAll(openrcConfDir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", openrcConfDir, err)
+	}
+
+	existing, err := os.ReadFile(openrcServiceConf)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", openrcServiceConf, err)
+	}
+
+	lines := strings.Split(string(existing), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "retry=") {
+			lines[i] = fmt.Sprintf("retry=%q", openrcStopRetry)
+			return os.WriteFile(openrcServiceConf, []byte(strings.Join(lines, "\n")), 0o644)
+		}
+	}
+
+	content := strings.TrimRight(string(existing), "\n")
+	if content != "" {
+		content += "\n"
+	}
+	content += fmt.Sprintf("retry=%q\n", openrcStopRetry)
+	return os.WriteFile(openrcServiceConf, []byte(content), 0o644)
+}
+
+// readPIDFile returns the pid stored in path, or 0 when the file is missing
+// or malformed.
+func readPIDFile(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+// processAlive reports whether pid still exists (a zombie still does).
+func processAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// waitProcessGone waits up to timeout for pid to disappear.
+func waitProcessGone(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !processAlive(pid) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// forceStopOpenRCService kills the daemon recorded in the OpenRC pidfile and
+// clears the service state so the service can be started again.
+//
+// It is the last resort for `rc-service stop` failures: OpenRC aborts the
+// whole restart when the old daemon refuses to die, which would otherwise
+// roll back an otherwise successful upgrade.
+func forceStopOpenRCService() error {
+	name := managerServiceName()
+	if pid := readPIDFile(openrcPidFile); pid > 0 {
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Signal(syscall.SIGTERM)
+			if !waitProcessGone(pid, 3*time.Second) {
+				_ = proc.Signal(syscall.SIGKILL)
+				waitProcessGone(pid, 2*time.Second)
+			}
+		}
+	}
+	_ = os.Remove(openrcPidFile)
+	// Reset the OpenRC bookkeeping so the next start is not rejected with
+	// "service is already started".
+	_ = runCommand("rc-service", name, "zap")
+	return nil
+}
+
+// restartServiceForUpgrade restarts the host service after the binaries were
+// replaced.
+//
+// On OpenRC a plain `rc-service restart` aborts with "1 process refused to
+// stop" when the old daemon outlives the stop window. Retry once with the
+// old process force-killed instead of rolling back a good upgrade.
+func restartServiceForUpgrade() error {
+	err := serviceRestartNoSudo()
+	if err == nil {
+		return nil
+	}
+	if initSystem() != "openrc" {
+		return err
+	}
+	fmt.Println("Service did not stop cleanly, forcing it down...")
+	if ferr := forceStopOpenRCService(); ferr != nil {
+		return err
+	}
+	return serviceRestartNoSudo()
 }
 
 func serviceStopNoSudo() error {
@@ -343,7 +496,7 @@ func printUsage() {
   fbctl bind add-machine --panel-url URL --token TOKEN --machine-id ID
   fbctl bind remove <instance-id>
   fbctl bind remove-machine --panel URL --machine-id ID
-  fbctl upgrade [--version VERSION] [--checksum SHA256]
+  fbctl upgrade [--version VERSION] [--checksum SHA256] [--no-restart]
   fbctl uninstall [--purge] [--yes]
   fbctl version
 
@@ -443,7 +596,7 @@ func runService(args []string) error {
 		if len(rest) == 0 {
 			rest = []string{"-f"}
 		}
-		return runCommand("sudo", append([]string{"journalctl", "-u", serviceName + ".service"}, rest...)...)
+		return runPrivileged("journalctl", append([]string{"-u", serviceName + ".service"}, rest...)...)
 	default:
 		return fmt.Errorf("unknown service command: %s", sub)
 	}
@@ -519,15 +672,27 @@ func runUpgrade(args []string) error {
 		return err
 	}
 
+	// Make sure the service manager can actually stop the daemon: OpenRC's
+	// default stop schedule (SIGTERM/5) is too tight for a graceful
+	// shutdown and makes the restart below fail with
+	// "1 process refused to stop".
+	if err := ensureOpenRCStopRetry(); err != nil {
+		fmt.Printf("Warning: could not configure OpenRC stop schedule: %v\n", err)
+	}
+
 	version := "latest"
 	checksum := ""
+	noRestart := false
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--version" && i+1 < len(args) {
+		switch {
+		case args[i] == "--version" && i+1 < len(args):
 			version = args[i+1]
 			i++
-		} else if args[i] == "--checksum" && i+1 < len(args) {
+		case args[i] == "--checksum" && i+1 < len(args):
 			checksum = args[i+1]
 			i++
+		case args[i] == "--no-restart":
+			noRestart = true
 		}
 	}
 
@@ -617,6 +782,7 @@ func runUpgrade(args []string) error {
 	// Backup existing binaries
 	backupBinary := defaultBinaryPath + ".bak"
 	backupCLI := defaultCLIPath + ".bak"
+	backupMeta := defaultMetaPath + ".bak"
 	// Backup existing binaries
 	if fileExists(defaultBinaryPath) {
 		if err := copyFile(defaultBinaryPath, backupBinary); err != nil {
@@ -626,6 +792,11 @@ func runUpgrade(args []string) error {
 	if fileExists(defaultCLIPath) {
 		if err := copyFile(defaultCLIPath, backupCLI); err != nil {
 			return cleanupFiles(newBinary, newCLI, fmt.Errorf("backup fbctl: %w", err))
+		}
+	}
+	if fileExists(defaultMetaPath) {
+		if err := copyFile(defaultMetaPath, backupMeta); err != nil {
+			return cleanupFiles(newBinary, newCLI, fmt.Errorf("backup install-meta: %w", err))
 		}
 	}
 
@@ -644,10 +815,35 @@ func runUpgrade(args []string) error {
 	// Recreate /usr/bin/fbctl symlink (Linux only)
 	ensureFbctlSymlink()
 
+	// Update install-meta.json BEFORE any service restart.
+	//
+	// A service restart tears down every process in the unit's cgroup —
+	// including this fbctl — so anything scheduled after the restart never
+	// runs. That used to leave the reported version stale and the .bak files
+	// sitting next to the live binaries forever.
+	newVer := "unknown"
+	if out, err := exec.Command(defaultBinaryPath, "-v").CombinedOutput(); err == nil {
+		newVer = strings.TrimSpace(string(out))
+	}
+	if root, err := loadWritableRootConfig(defaultConfigPath); err == nil {
+		instances, _ := root.NormalizeInstances()
+		writeInstallMetaVersioned(defaultMetaPath, root, newVer, latestInstanceID(instances))
+	}
+
+	if noRestart {
+		// The caller owns the restart: fboard-node performs it *after* it has
+		// acknowledged the upgrade to the panel, so the ack is not swallowed by
+		// the cgroup teardown. Move the rollback binaries out of the executable
+		// path but keep them for manual recovery.
+		archiveBackups(backupBinary, backupCLI, backupMeta)
+		fmt.Printf("Binary replaced (version: %s). Service restart required.\n", newVer)
+		return nil
+	}
+
 	// Restart service
 	fmt.Println("Restarting service...")
 	serviceDaemonReload()
-	if err := serviceRestartNoSudo(); err != nil {
+	if err := restartServiceForUpgrade(); err != nil {
 		fmt.Println("Restart failed, rolling back...")
 		rollbackOK := true
 		if fileExists(backupBinary) {
@@ -662,8 +858,14 @@ func runUpgrade(args []string) error {
 				rollbackOK = false
 			}
 		}
+		if fileExists(backupMeta) {
+			if e := os.Rename(backupMeta, defaultMetaPath); e != nil {
+				fmt.Printf("Warning: rollback install-meta failed: %v\n", e)
+				rollbackOK = false
+			}
+		}
 		serviceDaemonReload()
-		if e := serviceRestartNoSudo(); e != nil {
+		if e := restartServiceForUpgrade(); e != nil {
 			return fmt.Errorf("upgrade and rollback restart both failed: %w", e)
 		}
 		if rollbackOK {
@@ -675,19 +877,32 @@ func runUpgrade(args []string) error {
 	// Clean up backups
 	os.Remove(backupBinary)
 	os.Remove(backupCLI)
-
-	// Update install-meta.json
-	newVer := "unknown"
-	if out, err := exec.Command(defaultBinaryPath, "-v").CombinedOutput(); err == nil {
-		newVer = strings.TrimSpace(string(out))
-	}
-	if root, err := loadWritableRootConfig(defaultConfigPath); err == nil {
-		instances, _ := root.NormalizeInstances()
-		writeInstallMetaVersioned(defaultMetaPath, root, newVer, latestInstanceID(instances))
-	}
+	os.Remove(backupMeta)
 
 	fmt.Printf("Upgrade complete (version: %s)\n", newVer)
 	return nil
+}
+
+// archiveBackups moves rollback files out of the executable path into the
+// install backup directory. Used by `fbctl upgrade --no-restart`, where the
+// service restart is performed by the caller and the .bak files would
+// otherwise linger next to the live binaries.
+func archiveBackups(paths ...string) {
+	dir := filepath.Join(defaultInstallRoot, "backups", time.Now().UTC().Format("20060102-150405"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		for _, p := range paths {
+			os.Remove(p)
+		}
+		return
+	}
+	for _, p := range paths {
+		if !fileExists(p) {
+			continue
+		}
+		if err := os.Rename(p, filepath.Join(dir, filepath.Base(p))); err != nil {
+			os.Remove(p)
+		}
+	}
 }
 
 func runUninstall(args []string) error {
@@ -1584,7 +1799,6 @@ func runConfigInit(args []string) error {
 		}
 		instances = deduped
 	}
-
 
 	// Merge: replace if same ID exists, otherwise append.
 	replaced := false

@@ -5,12 +5,15 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fearless743/fboard-node/internal/cert"
 	"github.com/fearless743/fboard-node/internal/config"
+	"github.com/fearless743/fboard-node/internal/controlplane"
 	"github.com/fearless743/fboard-node/internal/kernel"
 	"github.com/fearless743/fboard-node/internal/limiter"
 	"github.com/fearless743/fboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/tracker"
 	"golang.org/x/time/rate"
 )
 
@@ -370,5 +373,56 @@ func TestKernelState(t *testing.T) {
 	running, desired = s.KernelState()
 	if running || desired {
 		t.Fatalf("after stop running=%v desired=%v", running, desired)
+	}
+}
+
+// blockingSink blocks in Report until the test releases it.
+type blockingSink struct {
+	release chan struct{}
+}
+
+func (b *blockingSink) Report(controlplane.ReportPayload) error {
+	<-b.release
+	return nil
+}
+func (b *blockingSink) ReportDevices(controlplane.PushClient, map[int][]string) {}
+func (b *blockingSink) SupportsReporting() bool                                 { return true }
+func (b *blockingSink) SupportsDeviceReports() bool                             { return false }
+
+// stubSource is a controlplane.Source that reports nothing.
+type stubSource struct{}
+
+func (stubSource) Initial(context.Context, func() map[string]interface{}, chan<- controlplane.Event, chan<- controlplane.StatusChange) (controlplane.Bootstrap, error) {
+	return controlplane.Bootstrap{}, nil
+}
+func (stubSource) Poll(context.Context) (controlplane.Snapshot, error) {
+	return controlplane.Snapshot{}, nil
+}
+func (stubSource) Metrics() controlplane.APIMetrics { return controlplane.APIMetrics{} }
+func (stubSource) SupportsPolling() bool            { return false }
+
+// TestPushReportSyncDoesNotBlockShutdown guards the shutdown budget.
+//
+// The final report is best-effort: the panel HTTP client allows 30s per
+// request, but the service manager only gives the daemon a few seconds to
+// exit (OpenRC's default stop schedule is SIGTERM/5). A hanging panel must
+// therefore never keep the daemon alive, otherwise `rc-service stop` fails
+// with "1 process refused to stop" and `fbctl upgrade` rolls back.
+func TestPushReportSyncDoesNotBlockShutdown(t *testing.T) {
+	s := newTestService(&fakeKernel{running: true})
+	s.tracker = tracker.New()
+	s.source = stubSource{}
+
+	release := make(chan struct{})
+	defer close(release)
+	s.sink = &blockingSink{release: release}
+
+	budget := finalReportTimeout + 500*time.Millisecond
+	start := time.Now()
+	s.pushReportSync()
+	elapsed := time.Since(start)
+
+	if elapsed > budget {
+		t.Fatalf("pushReportSync blocked for %v, want <= %v", elapsed, budget)
 	}
 }
