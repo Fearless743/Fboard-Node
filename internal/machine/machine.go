@@ -757,6 +757,15 @@ func strMapOnline(in map[int]int) map[string]int {
 	return out
 }
 
+// RequestFullSync asks the panel to re-push sync.config + sync.users for this node.
+func (p *machineNodePush) RequestFullSync() {
+	if p.ws == nil {
+		return
+	}
+	data, _ := json.Marshal(map[string]interface{}{"node_id": p.nodeID})
+	p.ws.SendRaw("request.sync", data)
+}
+
 func (p *machineNodePush) SendDeviceReport(devices map[int][]string) {
 	if p.ws == nil {
 		return

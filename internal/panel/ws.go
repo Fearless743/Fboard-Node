@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -335,8 +336,16 @@ func (w *WSClient) connect(ctx context.Context) error {
 	if w.token != "" {
 		header.Set("Authorization", "Bearer "+w.token)
 	}
-	conn, _, err := dialer.DialContext(ctx, u.String(), header)
+	conn, resp, err := dialer.DialContext(ctx, u.String(), header)
 	if err != nil {
+		// Surface the HTTP status so a mis-proxied /ws (404/426/403 from
+		// nginx/Caddy instead of 101) is diagnosable from node logs alone.
+		if resp != nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			resp.Body.Close()
+			return fmt.Errorf("dial: websocket handshake failed (http %s to %s://%s%s, body: %s): %w",
+				resp.Status, u.Scheme, u.Host, u.Path, strings.TrimSpace(string(body)), err)
+		}
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()

@@ -70,6 +70,10 @@ type PushClient interface {
 	SendDeviceReport(devices map[int][]string)
 	// SendReport delivers a node traffic/status report via WS (node.status).
 	SendReport(payload ReportPayload) error
+	// RequestFullSync asks the panel to re-push sync.config + sync.users
+	// for this node (covers late-join and races where the connect-time
+	// full-sync arrived before the mailbox existed).
+	RequestFullSync()
 	// SendOpAck reports the outcome of a remote-ops request (upgrade/restart).
 	// op ∈ "upgrade" / "restart", status ∈ "ok" / "failed". detail is a short
 	// human-readable reason for failed (or empty for ok).

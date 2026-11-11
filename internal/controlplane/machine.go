@@ -64,6 +64,10 @@ func (p *MachinePanelControlPlane) Initial(
 		// Mark ready immediately: WS full-sync may have arrived before the
 		// service started; DrainIfReady requires ready to emit.
 		mb.MarkReady()
+		// Re-request full-sync: covers nodes added via sync.nodes (panel only
+		// auto-pushes on connect) and races where the connect-time push
+		// arrived before this mailbox was registered.
+		p.push.RequestFullSync()
 	}
 
 	// WS-only bootstrap: wait for the panel full-sync (sync.config + sync.users)
