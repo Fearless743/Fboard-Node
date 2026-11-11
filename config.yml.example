@@ -13,7 +13,9 @@ machine:
 #   level: "info"
 # node:
 #   push_interval: 60
-#   pull_interval: 60
+# ws:
+#   url: ""               # explicit WS endpoint override (default: derived from panel.url + /ws)
+#   status_interval: 10
 # kernel:
 #   log_level: "warn"
 #   # Per-connection xray pipe buffer in KiB (default 16). Raise for high-throughput links.

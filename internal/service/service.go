@@ -71,71 +71,22 @@ type Service struct {
 	portClaim *portClaim
 
 	pushInterval int // seconds
-	pullInterval int // seconds
 
-	lastUserHash   string     // hash of user list for change detection
-	lastConfigHash string     // hash of full config for change detection
-	pullBackoff    apiBackoff // backoff for panel pull failures
-	pushBackoff    apiBackoff // backoff for panel push failures
+	lastUserHash   string // hash of user list for change detection
+	lastConfigHash string // hash of full config for change detection
 
-	// pushActive prevents overlapping push/pull goroutines.
+	// pushActive prevents overlapping push goroutines.
 	pushActive atomic.Bool
-	pullActive atomic.Bool
-	// pullResults delivers async pullViaAPI results back to the main goroutine.
-	pullResults chan pullResult
 
 	wsClient         controlplane.PushClient        // Push client (nil if push is not enabled)
 	wsEvents         chan controlplane.Event        // receives data events from push transport
 	wsStatusCh       chan controlplane.StatusChange // receives push connectivity notifications
 	wsCancel         context.CancelFunc             // cancels the WS client goroutine
-	wsDisconnectAt   time.Time                      // when WS last disconnected (zero if connected)
-	wsResyncPending  atomic.Bool
 	machineMailbox   *controlplane.NodeMailbox
 	machineMailboxCh <-chan struct{}
 
-	// metricsMu: lastUsers, lastConfig, wsClient, wsDisconnectAt (buildMetrics vs main loop).
+	// metricsMu: lastUsers, lastConfig, wsClient (buildMetrics vs main loop).
 	metricsMu sync.RWMutex
-}
-
-// pullResult carries the outcome of an async pullViaAPI back to the main goroutine.
-type pullResult struct {
-	config      *model.NodeSpec
-	users       []model.UserSpec
-	configHash  string
-	userHash    string
-	certChanged bool
-}
-
-// apiBackoff implements simple exponential backoff for API failures.
-type apiBackoff struct {
-	mu            sync.Mutex
-	skipRemaining int
-}
-
-func (b *apiBackoff) shouldSkip() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.skipRemaining > 0 {
-		b.skipRemaining--
-		return true
-	}
-	return false
-}
-
-func (b *apiBackoff) onSuccess() {
-	b.mu.Lock()
-	b.skipRemaining = 0
-	b.mu.Unlock()
-}
-
-func (b *apiBackoff) onFailure() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.skipRemaining <= 0 {
-		b.skipRemaining = 1
-	} else if b.skipRemaining < 8 {
-		b.skipRemaining *= 2
-	}
 }
 
 // NewWithControlPlane creates a Service with an externally-provided
@@ -231,7 +182,6 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 		cert:         certMgr,
 		wsEvents:     make(chan controlplane.Event, 16),
 		wsStatusCh:   make(chan controlplane.StatusChange, 4),
-		pullResults:  make(chan pullResult, 1),
 	}
 	// Default: kernel should run whenever config + users allow it.
 	svc.kernelDesired.Store(true)
@@ -278,14 +228,11 @@ func (s *Service) Run(ctx context.Context) error {
 	// Set up tickers
 	trackTicker := time.NewTicker(time.Duration(s.cfg.Node.TrackInterval) * time.Second)
 	pushInterval := time.Duration(math.Max(float64(s.pushInterval), 5)) * time.Second
-	pullInterval := time.Duration(s.pullInterval) * time.Second
 	reportTicker := time.NewTicker(pushInterval)
-	pullTicker := time.NewTicker(pullInterval)
 	deviceReportTicker := time.NewTicker(time.Duration(s.cfg.Node.DeviceReportInterval) * time.Second)
 
 	defer trackTicker.Stop()
 	defer reportTicker.Stop()
-	defer pullTicker.Stop()
 	defer deviceReportTicker.Stop()
 
 	s.startWSClient(ctx)
@@ -304,18 +251,6 @@ func (s *Service) Run(ctx context.Context) error {
 
 		case <-deviceReportTicker.C:
 			s.reportDevices()
-
-		case <-pullTicker.C:
-			// When WebSocket is connected, skip REST polling entirely.
-			// Config/user updates arrive via WS push.
-			if s.wsClient != nil && s.wsClient.IsConnected() {
-				continue
-			}
-			s.log().Debug("polling from API (ws not connected)")
-			s.pullViaAPIAsync(ctx)
-
-		case result := <-s.pullResults:
-			s.applyPullResult(ctx, result)
 
 		case status := <-s.wsStatusCh:
 			s.handleWSStatus(ctx, status)
@@ -346,15 +281,6 @@ func (s *Service) initialSetup(ctx context.Context) error {
 	}
 	if s.pushInterval == 0 {
 		s.pushInterval = 60
-	}
-
-	if s.cfg.Node.PullInterval == 0 && bootstrap.PullInterval > 0 {
-		s.pullInterval = bootstrap.PullInterval
-	} else {
-		s.pullInterval = s.cfg.Node.PullInterval
-	}
-	if s.pullInterval == 0 {
-		s.pullInterval = 60
 	}
 
 	if bootstrap.Push != nil {
@@ -525,20 +451,10 @@ func (s *Service) drainMachineMailbox(ctx context.Context) {
 		s.handleWSEvent(ctx, controlplane.Event{Type: controlplane.EventSyncDevices, DeviceUsers: state.DeviceUsers})
 	}
 	if state.NeedsReconcile {
-		s.requestWSResync(ctx, "machine_mailbox_reconcile")
+		// WS-only: a delta arrived before the full baseline. The panel
+		// re-pushes full sync on every (re)connect, so just wait for it.
+		s.log().Warn("ws state may be stale, waiting for full sync")
 	}
-}
-
-func (s *Service) requestWSResync(ctx context.Context, reason string) {
-	if !s.wsResyncPending.CompareAndSwap(false, true) {
-		return
-	}
-	if s.nodeLog != nil {
-		s.nodeLog.Warn("ws state may be stale, scheduling REST reconciliation", "reason", reason)
-	} else {
-		s.log().Warn("ws state may be stale, scheduling REST reconciliation", "reason", reason)
-	}
-	s.pullViaAPIAsync(ctx)
 }
 
 func (s *Service) wsMetrics() map[string]interface{} {
@@ -549,32 +465,19 @@ func (s *Service) wsMetrics() map[string]interface{} {
 }
 
 // handleWSStatus reacts to WS connectivity changes.
-
-// - On disconnect: record timestamp, immediately REST poll.
-// - On reconnect: clear disconnect timestamp, REST poll to catch missed events.
+//
+// WS-only: the panel pushes a full sync (sync.config + sync.users) on every
+// (re)connect, so there is nothing to poll — just track liveness.
 func (s *Service) handleWSStatus(ctx context.Context, status controlplane.StatusChange) {
-	if status.NeedsResync {
-		s.requestWSResync(ctx, "drop_detected")
-	}
 	if status.Connected {
-		s.metricsMu.Lock()
-		s.wsDisconnectAt = time.Time{}
-		s.metricsMu.Unlock()
 		// Use nodeLog if available, otherwise core
 		if s.nodeLog != nil {
 			s.nodeLog.Info("ws connected")
 		} else {
 			s.log().Info("ws connected")
 		}
-		// After reconnect, proactively pull once to ensure we haven't missed
-		// any updates during the disconnection window.
-		s.pullViaAPIAsync(ctx)
+		// Full sync arrives automatically from the panel on (re)connect.
 	} else {
-		s.metricsMu.Lock()
-		if s.wsDisconnectAt.IsZero() {
-			s.wsDisconnectAt = time.Now()
-		}
-		s.metricsMu.Unlock()
 		if s.nodeLog != nil {
 			s.nodeLog.Info("ws disconnected")
 		} else {
@@ -582,7 +485,6 @@ func (s *Service) handleWSStatus(ctx context.Context, status controlplane.Status
 		}
 		// Clear global device state on disconnect
 		s.kernel.ClearGlobalDevices()
-		s.pullViaAPIAsync(ctx)
 	}
 }
 
@@ -716,101 +618,6 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		}
 	default:
 		s.log().Debug(fmt.Sprintf("unknown ws event: %v", event.Type))
-	}
-}
-
-// pullViaAPIAsync fetches config/users from the panel API in a background
-// goroutine and sends the result to pullResults for the main goroutine to apply.
-func (s *Service) pullViaAPIAsync(ctx context.Context) {
-	if !s.source.SupportsPolling() {
-		return
-	}
-	if !s.pullActive.CompareAndSwap(false, true) {
-		s.log().Debug("pull already in progress, skipping")
-		return
-	}
-	if s.pullBackoff.shouldSkip() {
-		s.log().Debug("skipping pull due to backoff")
-		s.pullActive.Store(false)
-		return
-	}
-
-	currentConfigHash := s.lastConfigHash
-	certChanged := s.cert.CertRenewed()
-
-	go func() {
-		defer s.pullActive.Store(false)
-		snapshot, err := s.source.Poll(ctx)
-		if err != nil {
-			s.log().Error("poll control plane failed", "error", err)
-			s.pullBackoff.onFailure()
-			return
-		}
-		s.pullBackoff.onSuccess()
-
-		result := pullResult{certChanged: certChanged}
-		if snapshot.Config != nil {
-			result.config = snapshot.Config
-			result.configHash = computeConfigHash(snapshot.Config)
-			if result.configHash == currentConfigHash && !certChanged {
-				result.config = nil
-			}
-		}
-		if snapshot.Users != nil {
-			result.users = snapshot.Users
-			result.userHash = computeUserHash(snapshot.Users)
-		}
-
-		select {
-		case s.pullResults <- result:
-		case <-ctx.Done():
-		}
-	}()
-}
-
-// applyPullResult processes the result of an async pullViaAPI on the main goroutine.
-func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
-	s.wsResyncPending.Store(false)
-	configChanged := false
-
-	if result.certChanged {
-		s.log().Info("certificate renewed, kernel restart needed")
-		configChanged = true
-	}
-
-	if result.config != nil {
-		if err := validateNodeRuntime(s.kernel.Protocols(), result.config, s.cert.TLSCert()); err != nil {
-			s.log().Warn("runtime config validation failed", "error", err)
-			result.config = nil
-		} else {
-			configChanged = true
-			// Initialize or update node logger
-			if s.nodeLog == nil {
-				s.nodeLog = nlog.ForNodeOn(s.machineID(), result.config.Protocol, result.config.ServerPort)
-			}
-			s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(s.lastUsers)))
-			s.metricsMu.Lock()
-			s.lastConfig = result.config
-			s.metricsMu.Unlock()
-			s.lastConfigHash = result.configHash
-			if s.applyRemoteOverrides(ctx, result.config) {
-				configChanged = true
-			}
-		}
-	}
-
-	if result.users != nil {
-		usersChanged := result.userHash != s.lastUserHash
-
-		if usersChanged && !configChanged {
-			s.applyUserUpdate(ctx, result.users, result.userHash)
-		} else if usersChanged {
-			s.updateUserState(result.users)
-		}
-	}
-
-	if configChanged {
-		s.applyChanges(ctx, true, false)
 	}
 }
 
@@ -1276,19 +1083,15 @@ func (s *Service) trackAndEnforce(ctx context.Context) {
 	}
 }
 
-// pushReportAsync sends the report in a background goroutine so the select
-// loop is never blocked by slow HTTP. Only one push runs at a time.
+// pushReportAsync sends the report via WS node.status. Only one push runs at a time.
+// WS sends are non-blocking (buffered channel); on disconnect the flushed
+// tracker data is restored for the next tick.
 func (s *Service) pushReportAsync() {
 	if !s.sink.SupportsReporting() {
 		return
 	}
 	if !s.pushActive.CompareAndSwap(false, true) {
 		s.log().Debug("push already in progress, skipping")
-		return
-	}
-	if s.pushBackoff.shouldSkip() {
-		s.log().Debug("skipping report due to backoff")
-		s.pushActive.Store(false)
 		return
 	}
 
@@ -1302,28 +1105,24 @@ func (s *Service) pushReportAsync() {
 	go func() {
 		defer s.pushActive.Store(false)
 		if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
-			s.log().Warn("failed to push report", "error", err)
+			s.log().Debug("report skipped (ws not connected)")
 			if len(traffic) > 0 {
 				s.tracker.RestoreTraffic(traffic)
 			}
 			if len(aliveIPs) > 0 {
 				s.tracker.RestoreAliveIPs(aliveIPs)
 			}
-			s.pushBackoff.onFailure()
 			return
 		}
-		s.pushBackoff.onSuccess()
 		nlog.ReportPushed(len(traffic), len(online))
 	}()
 }
 
 // pushReportSync is used only during shutdown to ensure final data is sent.
 //
-// The report is best-effort: it is pushed through the panel HTTP client,
-// which allows up to 30s per request. Blocking the shutdown on that would
-// exceed the service manager's stop window (OpenRC allows 5s by default) and
-// make the service refuse to stop. The report therefore runs in the
-// background and is abandoned when it does not finish in time.
+// The report is best-effort over WS (non-blocking channel send) and is
+// abandoned when it does not finish in time so shutdown stays within the
+// service manager's stop window.
 func (s *Service) pushReportSync() {
 	if !s.sink.SupportsReporting() {
 		return

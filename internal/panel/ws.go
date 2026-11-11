@@ -7,11 +7,14 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/fearless743/fboard-node/internal/nlog"
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/gorilla/websocket"
 )
 
@@ -28,6 +31,8 @@ const (
 	WSEventSyncKernel    = "sync.kernel"    // panel → machine: kernel stop/start/reload/restart
 	WSEventSyncLogs      = "sync.logs"      // panel → machine: request recent logs
 	WSEventReportLogs    = "report.logs"    // machine → panel: reply with recent logs
+	WSEventNodeStatus    = "node.status"    // node → panel: traffic + alive + online + status + metrics
+	WSEventMachineStatus = "machine.status" // machine → panel: load + version + kernel aggregate
 )
 
 // WSEvent is a parsed data event delivered to the service layer.
@@ -141,6 +146,36 @@ type WSClientConfig struct {
 	MachineID        int
 }
 
+// authSuccessPayload mirrors the panel WS auth.success data (machine mode).
+type authSuccessPayload struct {
+	MachineID  int           `json:"machine_id"`
+	NodeIDs    []int         `json:"node_ids"`
+	Nodes      []MachineNode `json:"nodes"`
+	BaseConfig struct {
+		PushInterval int `json:"push_interval"`
+	} `json:"base_config"`
+}
+
+// DeriveWSURL builds the WS endpoint from the panel HTTP(S) URL.
+// https://panel.example.com → wss://panel.example.com/ws
+// http://127.0.0.1:7001 → ws://127.0.0.1:7001/ws
+// An explicit override (ws.url) takes precedence when non-empty.
+func DeriveWSURL(panelURL, override string) string {
+	if s := strings.TrimSpace(override); s != "" {
+		return strings.TrimRight(s, "/")
+	}
+	u, err := url.Parse(strings.TrimSpace(panelURL))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	scheme := "wss"
+	if strings.ToLower(u.Scheme) == "http" {
+		scheme = "ws"
+	}
+	path := strings.TrimSuffix(u.EscapedPath(), "/")
+	return scheme + "://" + u.Host + path + "/ws"
+}
+
 // WSClient connects to the panel's Workerman WS server using native WebSocket.
 // Authentication is sent primarily via the Authorization: Bearer header;
 // the token query parameter is retained only as a fallback for older panels.
@@ -152,6 +187,7 @@ type WSClient struct {
 	onEvent  func(WSEvent)
 	onStatus func(WSStatusChange)
 	onPing   func() map[string]interface{}
+	onAuth   func(AuthInfo)
 
 	cfg WSClientConfig
 
@@ -193,10 +229,40 @@ func NewWSClient(wsURL string, token string, nodeID int, cfg WSClientConfig, onE
 
 func (w *WSClient) IsConnected() bool { return w.connected.Load() }
 
+// SetOnAuth registers the callback for WS auth.success (initial machine state).
+func (w *WSClient) SetOnAuth(fn func(AuthInfo)) { w.onAuth = fn }
+
 func (w *WSClient) notifyStatus(connected bool) {
 	if w.onStatus != nil {
 		w.onStatus(WSStatusChange{Connected: connected})
 	}
+}
+
+// parseAuthSuccess converts an auth.success message into AuthInfo.
+func parseAuthSuccess(msg wsMessage) AuthInfo {
+	var p authSuccessPayload
+	if len(msg.Data) > 0 {
+		_ = json.Unmarshal(msg.Data, &p)
+	}
+	nodes := p.Nodes
+	if len(nodes) == 0 && len(p.NodeIDs) > 0 {
+		nodes = make([]MachineNode, 0, len(p.NodeIDs))
+		for _, id := range p.NodeIDs {
+			nodes = append(nodes, MachineNode{ID: id})
+		}
+	}
+	return AuthInfo{
+		MachineID:    p.MachineID,
+		Nodes:        nodes,
+		PushInterval: p.BaseConfig.PushInterval,
+	}
+}
+
+func (w *WSClient) emitAuth(msg wsMessage) {
+	if w.onAuth == nil {
+		return
+	}
+	w.onAuth(parseAuthSuccess(msg))
 }
 
 // Run connects and reconnects until ctx is cancelled.
@@ -303,6 +369,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 	} else {
 		w.connected.Store(true)
 		w.notifyStatus(true)
+		w.emitAuth(firstMsg)
 	}
 
 	// Ping interval: send pong responses to server pings.
@@ -387,6 +454,7 @@ func (w *WSClient) handleMessage(msg wsMessage) {
 
 	case "auth.success":
 		nlog.Core().Debug("ws auth confirmed")
+		w.emitAuth(msg)
 
 	case WSEventSyncConfig:
 		w.handleDataEvent(msg)
@@ -594,6 +662,35 @@ func (w *WSClient) SendDeviceReportForNode(nodeID int, devices map[int][]string)
 	}
 }
 
+// decodeWeakRaw decodes an interface (from JSON map) into a struct using weak type conversion.
+func decodeWeakRaw(input map[string]interface{}, output interface{}) error {
+	config := &mapstructure.DecoderConfig{
+		Metadata:         nil,
+		Result:           output,
+		WeaklyTypedInput: true,
+		TagName:          "json",
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			func(f, t reflect.Type, v interface{}) (interface{}, error) {
+				// Handle []interface{} -> StringOrArray
+				if t == reflect.TypeOf(StringOrArray("")) && f.Kind() == reflect.Slice {
+					arr, _ := v.([]interface{})
+					var strs []string
+					for _, x := range arr {
+						if s, ok := x.(string); ok {
+							strs = append(strs, s)
+						}
+					}
+					return StringOrArray(strings.Join(strs, "\n")), nil
+				}
+				return v, nil
+			},
+			mapstructure.StringToSliceHookFunc(","),
+		),
+	}
+	decoder, _ := mapstructure.NewDecoder(config)
+	return decoder.Decode(input)
+}
+
 // SendNodeStatus sends a node.status event with the given node_id (machine mode).
 func (w *WSClient) SendNodeStatus(nodeID int, stats map[string]interface{}) {
 	if !w.connected.Load() || stats == nil {
@@ -604,7 +701,7 @@ func (w *WSClient) SendNodeStatus(nodeID int, stats map[string]interface{}) {
 	}
 	data, _ := json.Marshal(stats)
 	msg := wsMessage{
-		Event:     "node.status",
+		Event:     WSEventNodeStatus,
 		Data:      data,
 		Timestamp: time.Now().Unix(),
 	}
@@ -612,6 +709,27 @@ func (w *WSClient) SendNodeStatus(nodeID int, stats map[string]interface{}) {
 	case w.writeCh <- msg:
 	default:
 		nlog.Core().Warn("ws write channel full, skipping node status")
+	}
+}
+
+// SendMachineStatus sends a machine.status event (machine load + version + kernel aggregate).
+func (w *WSClient) SendMachineStatus(stats map[string]interface{}) {
+	if !w.connected.Load() || stats == nil {
+		return
+	}
+	data, err := json.Marshal(stats)
+	if err != nil {
+		return
+	}
+	msg := wsMessage{
+		Event:     WSEventMachineStatus,
+		Data:      data,
+		Timestamp: time.Now().Unix(),
+	}
+	select {
+	case w.writeCh <- msg:
+	default:
+		nlog.Core().Warn("ws write channel full, skipping machine status")
 	}
 }
 

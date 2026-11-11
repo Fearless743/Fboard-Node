@@ -37,8 +37,8 @@ type Config struct {
 	HealthPort *int `yaml:"health_port,omitempty"`
 
 	// Machine identifies this process as a panel-managed machine that
-	// dynamically discovers and runs all nodes bound to it via
-	// GET /api/v2/server/machine/nodes. This is the only supported panel mode.
+	// dynamically discovers and runs all nodes bound to it over WS
+	// (auth.success / sync.nodes). This is the only supported panel mode.
 	Machine *MachineConfig `yaml:"machine,omitempty"`
 }
 
@@ -110,10 +110,11 @@ type NodeConfig struct {
 
 // WSConfig holds WebSocket client tuning options.
 type WSConfig struct {
-	StatusInterval   int `yaml:"status_interval"`   // node.status interval (sec), default 10
-	HandshakeTimeout int `yaml:"handshake_timeout"` // WS handshake timeout (sec), default 15
-	BackoffInitial   int `yaml:"backoff_initial"`   // initial reconnect delay (sec), default 1
-	BackoffMax       int `yaml:"backoff_max"`       // max reconnect delay (sec), default 60
+	URL              string `yaml:"url"`               // explicit WS endpoint override (default: derived from panel.url + /ws)
+	StatusInterval   int    `yaml:"status_interval"`   // node.status interval (sec), default 10
+	HandshakeTimeout int    `yaml:"handshake_timeout"` // WS handshake timeout (sec), default 15
+	BackoffInitial   int    `yaml:"backoff_initial"`   // initial reconnect delay (sec), default 1
+	BackoffMax       int    `yaml:"backoff_max"`       // max reconnect delay (sec), default 60
 }
 
 type KernelConfig struct {
@@ -195,10 +196,10 @@ type RootConfig struct {
 
 // legacyRootProbe detects removed config keys so we can fail with a clear message.
 type legacyRootProbe struct {
-	Nodes      []any               `yaml:"nodes"`
-	Standalone any                 `yaml:"standalone"`
-	Panel      panelYAML           `yaml:"panel"`
-	Machine    *MachineConfig      `yaml:"machine"`
+	Nodes      []any                 `yaml:"nodes"`
+	Standalone any                   `yaml:"standalone"`
+	Panel      panelYAML             `yaml:"panel"`
+	Machine    *MachineConfig        `yaml:"machine"`
 	Instances  []legacyInstanceProbe `yaml:"instances"`
 }
 
@@ -509,6 +510,9 @@ func (c *Config) inheritFrom(parent *Config) {
 		c.Node.DeviceReportInterval = parent.Node.DeviceReportInterval
 	}
 	// WS
+	if c.WS.URL == "" {
+		c.WS.URL = parent.WS.URL
+	}
 	if c.WS.StatusInterval == 0 {
 		c.WS.StatusInterval = parent.WS.StatusInterval
 	}

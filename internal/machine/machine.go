@@ -1,5 +1,5 @@
-// Package machine implements the machine-mode orchestrator that dynamically
-// discovers nodes from the panel's machine API and manages their lifecycles.
+// Package machine implements the machine-mode orchestrator that manages node
+// lifecycles over a single shared WebSocket connection (WS-only, no REST).
 package machine
 
 import (
@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,13 +32,16 @@ type nodeHandle struct {
 }
 
 // Orchestrator manages all nodes bound to a panel machine. It:
-//   - discovers nodes via GET /machine/nodes
+//   - learns nodes from WS auth.success / sync.nodes
 //   - starts / stops Service instances as nodes are added / removed
 //   - maintains a shared WS connection that demuxes events by node_id
-//   - reports machine-level load via POST /machine/status
+//   - reports machine-level load via WS machine.status
 type Orchestrator struct {
-	cfg    *config.Config
-	client *panel.Client // machine-level client (no node_id)
+	cfg       *config.Config
+	panelURL  string
+	token     string
+	machineID int
+	wsURL     string
 
 	mu    sync.Mutex
 	nodes map[int]*nodeHandle // node_id → handle
@@ -48,7 +52,7 @@ type Orchestrator struct {
 	mailboxes map[int]*controlplane.NodeMailbox
 	statuses  map[int]chan<- controlplane.StatusChange
 
-	// Shared WS client (nil when WS is disabled).
+	// Shared WS client.
 	ws       *panel.WSClient
 	wsCancel context.CancelFunc
 
@@ -56,20 +60,23 @@ type Orchestrator struct {
 	// for sync.nodes events without blocking the main loop.
 	runCtx context.Context
 
-	pullInterval time.Duration
 	pushInterval time.Duration
 }
 
 // New creates a machine orchestrator from the given config.
 func New(cfg *config.Config) *Orchestrator {
-	panelCfg := config.PanelConfig{
-		URL:       cfg.Panel.URL,
-		Token:     cfg.Machine.Token,
-		MachineID: cfg.Machine.MachineID,
+	machineID := 0
+	token := ""
+	if cfg.Machine != nil {
+		machineID = cfg.Machine.MachineID
+		token = cfg.Machine.Token
 	}
 	return &Orchestrator{
 		cfg:       cfg,
-		client:    panel.NewClient(panelCfg),
+		panelURL:  cfg.Panel.URL,
+		token:     token,
+		machineID: machineID,
+		wsURL:     panel.DeriveWSURL(cfg.Panel.URL, cfg.WS.URL),
 		nodes:     make(map[int]*nodeHandle),
 		mailboxes: make(map[int]*controlplane.NodeMailbox),
 		statuses:  make(map[int]chan<- controlplane.StatusChange),
@@ -78,43 +85,32 @@ func New(cfg *config.Config) *Orchestrator {
 
 // log returns a logger scoped to this machine so multi-instance rings never mix.
 func (o *Orchestrator) log() *nlog.NodeLog {
-	if o.cfg != nil && o.cfg.Machine != nil && o.cfg.Machine.MachineID > 0 {
-		return nlog.ForMachine(o.cfg.Machine.MachineID)
+	if o.machineID > 0 {
+		return nlog.ForMachine(o.machineID)
 	}
 	return nlog.Core()
-}
-
-func (o *Orchestrator) machineID() int {
-	if o.cfg != nil && o.cfg.Machine != nil {
-		return o.cfg.Machine.MachineID
-	}
-	return 0
 }
 
 // Run is the main loop. It blocks until ctx is cancelled.
 func (o *Orchestrator) Run(ctx context.Context) error {
 	o.runCtx = ctx
-	nodesResp, err := o.client.GetMachineNodes()
-	if err != nil {
-		return fmt.Errorf("initial node discovery: %w", err)
+	if o.wsURL == "" {
+		return fmt.Errorf("cannot derive WS url from panel.url %q", o.panelURL)
+	}
+	if o.machineID <= 0 || o.token == "" {
+		return fmt.Errorf("machine.machine_id and machine.token are required")
 	}
 
-	o.applyIntervals(nodesResp.BaseConfig)
-	o.log().Info(fmt.Sprintf("machine %d: discovered %d nodes",
-		o.cfg.Machine.MachineID, len(nodesResp.Nodes)))
-
-	// Start machine-level WS as early as possible so sync.nodes can reach an
-	// empty machine before the first node is attached.
-	o.tryStartWS(ctx)
-
-	// Start initial nodes.
-	for _, n := range nodesResp.Nodes {
-		o.startNode(ctx, n)
+	o.pushInterval = 60 * time.Second
+	if o.cfg.Node.PushInterval > 0 {
+		o.pushInterval = time.Duration(o.cfg.Node.PushInterval) * time.Second
 	}
 
-	discoveryTicker := time.NewTicker(o.pullInterval)
+	// Start machine-level WS; node discovery arrives via auth.success.
+	o.startWS(ctx)
+	o.log().Info(fmt.Sprintf("machine %d: ws connecting to %s", o.machineID, o.wsURL))
+
 	statusTicker := time.NewTicker(o.pushInterval)
-	defer discoveryTicker.Stop()
 	defer statusTicker.Stop()
 
 	for {
@@ -122,9 +118,6 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			o.stopAll()
 			return nil
-
-		case <-discoveryTicker.C:
-			o.rediscover(ctx)
 
 		case <-statusTicker.C:
 			o.reportMachineStatus()
@@ -160,10 +153,6 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 
 	nodeCfg := o.cfg.ExpandMachineNode(mn.ID)
 
-	perNodeClient := o.client.ForNode(mn.ID)
-	// Reset cached ETag so the subsequent GetConfig in Initial() gets a full response.
-	perNodeClient.ResetConfigETag()
-
 	var push controlplane.PushClient
 	if o.ws != nil {
 		push = &machineNodePush{
@@ -180,7 +169,8 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 		return mb
 	}
 
-	cp := controlplane.NewMachinePanelControlPlane(perNodeClient, nodeCfg.Kernel, push, registerFn)
+	pushInterval := int(o.pushInterval / time.Second)
+	cp := controlplane.NewMachinePanelControlPlane(nodeCfg.Kernel, push, pushInterval, registerFn)
 	svc := service.NewWithControlPlane(nodeCfg, cp)
 
 	o.mu.Lock()
@@ -243,17 +233,12 @@ func (o *Orchestrator) stopAll() {
 	}
 }
 
-// ─── Node discovery ──────────────────────────────────────────────────────
+// ─── Node discovery (WS-driven) ──────────────────────────────────────────
 
-func (o *Orchestrator) rediscover(ctx context.Context) {
-	nodesResp, err := o.client.GetMachineNodes()
-	if err != nil {
-		o.log().Warn("machine node discovery failed", "error", err)
-		return
-	}
-
-	wanted := make(map[int]panel.MachineNode, len(nodesResp.Nodes))
-	for _, n := range nodesResp.Nodes {
+// applyNodes reconciles running nodes with the latest panel-provided list.
+func (o *Orchestrator) applyNodes(nodes []panel.MachineNode) {
+	wanted := make(map[int]panel.MachineNode, len(nodes))
+	for _, n := range nodes {
 		wanted[n.ID] = n
 	}
 
@@ -271,8 +256,7 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 	}
 
 	// Clean up any orphaned mailbox/status entries for nodes that are no
-	// longer part of this machine (e.g. after a crashed service exited
-	// without unregistering, or a node that disappeared from the panel).
+	// longer part of this machine.
 	o.eventsMu.Lock()
 	for id := range o.mailboxes {
 		if _, ok := wanted[id]; !ok {
@@ -286,26 +270,36 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 	}
 	o.eventsMu.Unlock()
 
-	for _, n := range nodesResp.Nodes {
+	ctx := o.runCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for _, n := range nodes {
 		o.startNode(ctx, n) // no-op if already running
 	}
 }
 
-// ─── Machine status reporting ────────────────────────────────────────────
+// ─── Machine status reporting (WS) ───────────────────────────────────────
 
 func (o *Orchestrator) reportMachineStatus() {
-	s := monitor.Collect()
-	if err := o.client.ReportMachineStatus(
-		s.CPU,
-		[2]uint64{s.MemTotal, s.MemUsed},
-		[2]uint64{s.SwapTotal, s.SwapUsed},
-		[2]uint64{s.DiskTotal, s.DiskUsed},
-		s.NetInSpeed, s.NetOutSpeed,
-		buildinfo.Version,
-		o.aggregateKernelStatus(),
-	); err != nil {
-		o.log().Warn("machine status report failed", "error", err)
+	if o.ws == nil || !o.ws.IsConnected() {
+		return
 	}
+	s := monitor.Collect()
+	payload := map[string]interface{}{
+		"cpu":  s.CPU,
+		"mem":  map[string]interface{}{"total": s.MemTotal, "used": s.MemUsed},
+		"swap": map[string]interface{}{"total": s.SwapTotal, "used": s.SwapUsed},
+		"disk": map[string]interface{}{"total": s.DiskTotal, "used": s.DiskUsed},
+	}
+	if s.NetInSpeed >= 0 && s.NetOutSpeed >= 0 {
+		payload["net"] = map[string]interface{}{"in_speed": s.NetInSpeed, "out_speed": s.NetOutSpeed}
+	}
+	if buildinfo.Version != "" {
+		payload["version"] = buildinfo.Version
+	}
+	payload["kernel"] = o.aggregateKernelStatus()
+	o.ws.SendMachineStatus(payload)
 }
 
 // aggregateKernelStatus summarizes embedded-kernel state across all node
@@ -363,34 +357,25 @@ func (o *Orchestrator) aggregateKernelStatus() map[string]interface{} {
 
 // ─── WS mux ─────────────────────────────────────────────────────────────
 
-func (o *Orchestrator) tryStartWS(ctx context.Context) {
-	hs, err := o.client.Handshake()
-	if err != nil {
-		o.log().Warn("machine ws handshake failed, REST only", "error", err)
-		return
-	}
-	if !hs.WebSocket.Enabled || hs.WebSocket.WSURL == "" {
-		o.log().Info("machine: ws disabled by panel, REST only")
-		return
-	}
-
+func (o *Orchestrator) startWS(ctx context.Context) {
 	wsCfg := panel.WSClientConfig{
 		StatusInterval:   time.Duration(o.cfg.WS.StatusInterval) * time.Second,
 		HandshakeTimeout: time.Duration(o.cfg.WS.HandshakeTimeout) * time.Second,
 		BackoffInitial:   time.Duration(o.cfg.WS.BackoffInitial) * time.Second,
 		BackoffMax:       time.Duration(o.cfg.WS.BackoffMax) * time.Second,
-		MachineID:        o.cfg.Machine.MachineID,
+		MachineID:        o.machineID,
 	}
 
 	o.ws = panel.NewWSClient(
-		hs.WebSocket.WSURL,
-		o.cfg.Machine.Token,
+		o.wsURL,
+		o.token,
 		0, // no single node_id
 		wsCfg,
 		o.onWSEvent,
 		o.onWSStatus,
 		nil, // per-node status is sent via machineNodePush
 	)
+	o.ws.SetOnAuth(o.onWSAuth)
 
 	wsCtx, wsCancel := context.WithCancel(ctx)
 	o.wsCancel = wsCancel
@@ -399,13 +384,23 @@ func (o *Orchestrator) tryStartWS(ctx context.Context) {
 	o.log().Info("machine: ws mux started")
 }
 
+// onWSAuth handles the initial node list from WS auth.success.
+func (o *Orchestrator) onWSAuth(auth panel.AuthInfo) {
+	if auth.PushInterval >= 10 {
+		o.pushInterval = time.Duration(auth.PushInterval) * time.Second
+	}
+	o.log().Info(fmt.Sprintf("machine %d: discovered %d nodes via WS",
+		o.machineID, len(auth.Nodes)))
+	o.applyNodes(auth.Nodes)
+}
+
 // onWSEvent routes a WS event to the correct node's channel.
 // Machine-level events (sync.nodes / sync.logs / upgrade / kernel / legacy restart) are handled here.
 func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 	switch event.Type {
 	case panel.WSEventSyncNodes:
-		o.log().Info("machine received sync.nodes, triggering immediate rediscovery")
-		go o.rediscover(o.runCtx)
+		o.log().Info("machine received sync.nodes, reconciling")
+		o.applyNodes(event.Nodes)
 		return
 
 	case panel.WSEventSyncLogs:
@@ -462,11 +457,11 @@ func (o *Orchestrator) handleSyncLogs(event panel.WSEvent) {
 	if limit > 1000 {
 		limit = 1000
 	}
-	lines := nlog.Recent(o.machineID(), limit)
+	lines := nlog.Recent(o.machineID, limit)
 	if lines == nil {
 		lines = []string{}
 	}
-	o.log().Debug("machine replying sync.logs", "machine_id", o.machineID(), "lines", len(lines), "req_id", event.LogReqID)
+	o.log().Debug("machine replying sync.logs", "machine_id", o.machineID, "lines", len(lines), "req_id", event.LogReqID)
 	o.ws.SendReportLogs(lines, event.LogReqID)
 }
 
@@ -697,17 +692,6 @@ func (o *Orchestrator) unregisterNode(nodeID int) {
 	o.eventsMu.Unlock()
 }
 
-func (o *Orchestrator) applyIntervals(bc panel.MachineBaseConfig) {
-	o.pullInterval = time.Duration(bc.PullInterval) * time.Second
-	if o.pullInterval < 30*time.Second {
-		o.pullInterval = 60 * time.Second
-	}
-	o.pushInterval = time.Duration(bc.PushInterval) * time.Second
-	if o.pushInterval < 10*time.Second {
-		o.pushInterval = 60 * time.Second
-	}
-}
-
 // ─── Virtual PushClient ─────────────────────────────────────────────────
 
 // machineNodePush implements controlplane.PushClient for a single node
@@ -726,6 +710,51 @@ func (p *machineNodePush) Run(ctx context.Context) {
 
 func (p *machineNodePush) IsConnected() bool {
 	return p.ws != nil && p.ws.IsConnected()
+}
+
+// SendReport delivers traffic + alive + online + status + metrics via WS node.status.
+func (p *machineNodePush) SendReport(payload controlplane.ReportPayload) error {
+	if p.ws == nil || !p.ws.IsConnected() {
+		return fmt.Errorf("ws not connected")
+	}
+	data := map[string]interface{}{
+		"traffic": strMapTraffic(payload.Traffic),
+		"alive":   strMapAlive(payload.Alive),
+		"online":  strMapOnline(payload.Online),
+		"status": map[string]interface{}{
+			"cpu":  payload.CPU,
+			"mem":  map[string]interface{}{"total": payload.Mem[0], "used": payload.Mem[1]},
+			"swap": map[string]interface{}{"total": payload.Swap[0], "used": payload.Swap[1]},
+			"disk": map[string]interface{}{"total": payload.Disk[0], "used": payload.Disk[1]},
+		},
+		"metrics": payload.Metrics,
+	}
+	p.ws.SendNodeStatus(p.nodeID, data)
+	return nil
+}
+
+func strMapTraffic(in map[int][2]int64) map[string][2]int64 {
+	out := make(map[string][2]int64, len(in))
+	for uid, d := range in {
+		out[strconv.Itoa(uid)] = d
+	}
+	return out
+}
+
+func strMapAlive(in map[int][]string) map[string][]string {
+	out := make(map[string][]string, len(in))
+	for uid, ips := range in {
+		out[strconv.Itoa(uid)] = ips
+	}
+	return out
+}
+
+func strMapOnline(in map[int]int) map[string]int {
+	out := make(map[string]int, len(in))
+	for uid, c := range in {
+		out[strconv.Itoa(uid)] = c
+	}
+	return out
 }
 
 func (p *machineNodePush) SendDeviceReport(devices map[int][]string) {

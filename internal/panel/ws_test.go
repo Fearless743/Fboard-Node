@@ -61,6 +61,57 @@ func fakeWSServer(t *testing.T, events []wsMessage) *httptest.Server {
 	}))
 }
 
+func TestDeriveWSURL(t *testing.T) {
+	cases := []struct {
+		panel    string
+		override string
+		want     string
+	}{
+		{"https://panel.example.com", "", "wss://panel.example.com/ws"},
+		{"https://panel.example.com/", "", "wss://panel.example.com/ws"},
+		{"http://127.0.0.1:7001", "", "ws://127.0.0.1:7001/ws"},
+		{"https://panel.example.com/sub", "", "wss://panel.example.com/sub/ws"},
+		{"https://panel.example.com", "wss://ws.example.com:8076", "wss://ws.example.com:8076"},
+		{"bogus", "", ""},
+	}
+	for _, c := range cases {
+		if got := DeriveWSURL(c.panel, c.override); got != c.want {
+			t.Errorf("DeriveWSURL(%q, %q) = %q, want %q", c.panel, c.override, got, c.want)
+		}
+	}
+}
+
+func TestParseAuthSuccess(t *testing.T) {
+	data, _ := json.Marshal(map[string]interface{}{
+		"machine_id": 3,
+		"node_ids":   []int{7},
+		"nodes":      []MachineNode{{ID: 7, Type: "vless", Name: "n7"}},
+		"base_config": map[string]interface{}{
+			"push_interval": 45,
+		},
+	})
+	info := parseAuthSuccess(wsMessage{Event: "auth.success", Data: data})
+	if info.MachineID != 3 {
+		t.Errorf("MachineID = %d, want 3", info.MachineID)
+	}
+	if len(info.Nodes) != 1 || info.Nodes[0].ID != 7 {
+		t.Errorf("Nodes = %+v, want [{ID:7}]", info.Nodes)
+	}
+	if info.PushInterval != 45 {
+		t.Errorf("PushInterval = %d, want 45", info.PushInterval)
+	}
+
+	// Legacy shape without nodes list falls back to node_ids.
+	legacy, _ := json.Marshal(map[string]interface{}{
+		"machine_id": 3,
+		"node_ids":   []int{9},
+	})
+	info = parseAuthSuccess(wsMessage{Event: "auth.success", Data: legacy})
+	if len(info.Nodes) != 1 || info.Nodes[0].ID != 9 {
+		t.Errorf("legacy Nodes = %+v, want [{ID:9}]", info.Nodes)
+	}
+}
+
 func TestWSClient_ConnectAndReceiveDataEvents(t *testing.T) {
 	configPayload := syncConfigPayload{
 		Config:    NodeConfig{Protocol: "vless", ServerPort: 443},

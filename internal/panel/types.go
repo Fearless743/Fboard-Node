@@ -24,64 +24,27 @@ func (s *StringOrArray) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("StringOrArray: expected string or []string, got %s", string(data))
 }
 
-// HandshakeResponse is the response from POST /api/v2/server/handshake
-type HandshakeResponse struct {
-	WebSocket WSConfig `json:"websocket"`
-	Settings  Settings `json:"settings"`
-}
-
-func (h *HandshakeResponse) UnmarshalJSON(data []byte) error {
-	type Alias HandshakeResponse
-	aux := &struct {
-		Settings json.RawMessage `json:"settings"`
-		*Alias
-	}{
-		Alias: (*Alias)(h),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	// If settings is an empty array [], skip unmarshaling it into the struct
-	if len(aux.Settings) > 0 && string(aux.Settings) != "[]" {
-		if err := json.Unmarshal(aux.Settings, &h.Settings); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// WSConfig holds WebSocket connection settings from the panel
-type WSConfig struct {
-	Enabled bool   `json:"enabled"`
-	WSURL   string `json:"ws_url,omitempty"`
-}
-
-// Settings holds panel-defined intervals
-type Settings struct {
-	PushInterval int `json:"push_interval"`
-	PullInterval int `json:"pull_interval"`
-}
-
-// MachineNode is a single entry returned by GET /api/v2/server/machine/nodes.
+// MachineNode is a single node bound to a machine (via WS auth.success / sync.nodes).
 type MachineNode struct {
 	ID   int    `json:"id"`
 	Type string `json:"type"`
 	Name string `json:"name"`
 }
 
-// MachineNodesResponse is the response from GET /api/v2/server/machine/nodes.
-type MachineNodesResponse struct {
-	Nodes      []MachineNode     `json:"nodes"`
-	BaseConfig MachineBaseConfig `json:"base_config"`
+// AuthInfo carries the initial machine state from WS auth.success.
+type AuthInfo struct {
+	MachineID    int
+	Nodes        []MachineNode
+	PushInterval int
 }
 
-// MachineBaseConfig holds polling intervals for machine mode.
-type MachineBaseConfig struct {
+// BaseConfig holds node-level intervals (legacy; kept for WS payload compat).
+type BaseConfig struct {
 	PushInterval int `json:"push_interval"`
 	PullInterval int `json:"pull_interval"`
 }
 
-// NodeConfig is the response from GET /api/v2/server/config
+// NodeConfig is the node configuration delivered via WS sync.config.
 type NodeConfig struct {
 	// NodeID is populated in machine-mode WS events for routing.
 	NodeID          int                    `json:"node_id,omitempty"`
@@ -274,11 +237,6 @@ type OutboundConfig struct {
 	Protocol string         `json:"protocol"`            // vmess, vless, shadowsocks, wireguard, etc.
 	Settings map[string]any `json:"settings,omitempty"`  // Protocol-specific settings
 	ProxyTag string         `json:"proxy_tag,omitempty"` // Chain proxy: next outbound tag
-}
-
-type BaseConfig struct {
-	PushInterval int `json:"push_interval"`
-	PullInterval int `json:"pull_interval"`
 }
 
 type RouteRule struct {

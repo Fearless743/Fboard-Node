@@ -9,7 +9,7 @@ Guidance for AI coding agents working in this repository.
 - `internal/machine/` — machine orchestrator (discovers nodes, shared WS)
 - `internal/service/` — per-node runtime (kernel lifecycle, traffic, certs)
 - `internal/controlplane/` — machine control plane + mailbox
-- `internal/panel/` — panel REST + WebSocket client (V2 machine auth)
+- `internal/panel/` — panel WebSocket client (WS-only, V2 machine auth)
 - `internal/kernel/` — kernel interface + `xray/` adapter (only kernel)
 - `internal/config/` — YAML config (machine-only panel connection)
 - `internal/model/` — node/user specs and validation
@@ -33,7 +33,7 @@ machine:
 ```
 
 Static `panel.node_id` / `nodes:` / standalone configs are rejected.
-Per-node runtime still uses `node_id` after discovery via `/api/v2/server/machine/nodes`.
+Per-node runtime still uses `node_id` after discovery via WS `auth.success` / `sync.nodes`.
 
 ## Commands
 

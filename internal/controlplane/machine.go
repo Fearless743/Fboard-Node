@@ -3,21 +3,19 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/fearless743/fboard-node/internal/config"
-	"github.com/fearless743/fboard-node/internal/model"
-	"github.com/fearless743/fboard-node/internal/nlog"
-	"github.com/fearless743/fboard-node/internal/panel"
 )
 
 // MachinePanelControlPlane implements ControlPlane for a single node running
-// under the machine orchestrator. REST calls go through a per-node panel.Client
-// with machine-level auth; WS events are delivered via an externally-managed
-// PushClient supplied by the machine WS mux.
+// under the machine orchestrator. WS-only: initial config/users come from the
+// shared WS mailbox (panel pushFullSync on connect); reports go out via the
+// virtual PushClient backed by the shared machine WS connection.
 type MachinePanelControlPlane struct {
-	client *panel.Client
-	kcfg   config.KernelConfig
-	push   PushClient // virtual push client from WS mux (may be nil)
+	kcfg         config.KernelConfig
+	push         PushClient // virtual push client from WS mux (may be nil)
+	pushInterval int
 
 	registerFn func(statuses chan<- StatusChange) *NodeMailbox
 }
@@ -25,23 +23,23 @@ type MachinePanelControlPlane struct {
 // NewMachinePanelControlPlane creates a per-node control plane for machine mode.
 // push may be nil if WS is unavailable.
 // registerFn is called during Initial() to wire machine mailbox access and status
-// updates into the service loop. It may be nil when WS is not used.
+// updates into the service loop.
 func NewMachinePanelControlPlane(
-	client *panel.Client,
 	kcfg config.KernelConfig,
 	push PushClient,
+	pushInterval int,
 	registerFn func(statuses chan<- StatusChange) *NodeMailbox,
 ) *MachinePanelControlPlane {
 	return &MachinePanelControlPlane{
-		client:     client,
-		kcfg:       kcfg,
-		push:       push,
-		registerFn: registerFn,
+		kcfg:         kcfg,
+		push:         push,
+		pushInterval: pushInterval,
+		registerFn:   registerFn,
 	}
 }
 
-func (p *MachinePanelControlPlane) SupportsPolling() bool       { return true }
-func (p *MachinePanelControlPlane) SupportsReporting() bool     { return true }
+func (p *MachinePanelControlPlane) SupportsPolling() bool       { return false }
+func (p *MachinePanelControlPlane) SupportsReporting() bool     { return p.push != nil }
 func (p *MachinePanelControlPlane) SupportsDeviceReports() bool { return p.push != nil }
 
 func (p *MachinePanelControlPlane) Initial(
@@ -50,77 +48,70 @@ func (p *MachinePanelControlPlane) Initial(
 	events chan<- Event,
 	statuses chan<- StatusChange,
 ) (Bootstrap, error) {
-	// In machine mode the orchestrator handles the shared WS handshake, but each
-	// node service still needs one initial REST snapshot so newly discovered nodes
-	// can start immediately instead of waiting for a subsequent WS full-sync.
-	hs, err := p.client.Handshake()
-	if err != nil {
-		nlog.Core().Debug("machine node handshake skipped, using REST", "error", err)
-	}
-
 	bootstrap := Bootstrap{}
-	if hs != nil {
-		bootstrap.PushInterval = hs.Settings.PushInterval
-		bootstrap.PullInterval = hs.Settings.PullInterval
+	if p.pushInterval > 0 {
+		bootstrap.PushInterval = p.pushInterval
 	}
 
-	configSnapshot, err := p.client.GetConfig()
-	if err != nil {
-		return Bootstrap{}, fmt.Errorf("machine initial config: %w", err)
-	}
-	if configSnapshot == nil {
-		return Bootstrap{}, fmt.Errorf("machine initial config is nil")
-	}
-	users, err := p.client.GetUsers()
-	if err != nil {
-		return Bootstrap{}, fmt.Errorf("machine initial users: %w", err)
-	}
-	bootstrap.Config, err = model.NodeSpecFromPanelValidated(configSnapshot, p.kcfg)
-	if err != nil {
-		return Bootstrap{}, fmt.Errorf("machine initial config normalize: %w", err)
-	}
-	bootstrap.Users = model.UserSpecsFromPanel(users)
-
-	// Register mailbox access after the initial snapshot is prepared, so the
-	// Service can start the kernel immediately and only then drain coalesced WS
-	// state from the machine mailbox.
-	if p.push != nil {
-		if p.registerFn != nil {
-			bootstrap.Mailbox = p.registerFn(statuses)
-		}
+	// Register mailbox access so WS events have somewhere to land while we wait.
+	var mb *NodeMailbox
+	var mailboxCh <-chan struct{}
+	if p.push != nil && p.registerFn != nil {
+		mb = p.registerFn(statuses)
+		bootstrap.Mailbox = mb
 		bootstrap.Push = p.push
+		mailboxCh = mb.NotifyCh()
+		// Mark ready immediately: WS full-sync may have arrived before the
+		// service started; DrainIfReady requires ready to emit.
+		mb.MarkReady()
 	}
 
-	return bootstrap, nil
+	// WS-only bootstrap: wait for the panel full-sync (sync.config + sync.users)
+	// instead of REST polling. The panel pushes both on every (re)connect.
+	timeout := 60 * time.Second
+	if dl, ok := ctx.Deadline(); ok {
+		if d := time.Until(dl); d < timeout {
+			timeout = d
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		if mb != nil {
+			state := mb.DrainIfReady()
+			if state.HasConfig {
+				bootstrap.Config = state.Config
+			}
+			if state.HasUsers {
+				bootstrap.Users = state.Users
+			}
+			if bootstrap.Config != nil && bootstrap.Users != nil {
+				return bootstrap, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return Bootstrap{}, ctx.Err()
+		case <-timer.C:
+			if bootstrap.Config != nil && bootstrap.Users != nil {
+				return bootstrap, nil
+			}
+			return Bootstrap{}, fmt.Errorf("machine initial sync timeout: waiting for WS full-sync")
+		case <-mailboxCh:
+		}
+	}
 }
 
 func (p *MachinePanelControlPlane) Poll(ctx context.Context) (Snapshot, error) {
-	configSnapshot, err := p.client.GetConfig()
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("machine poll config: %w", err)
-	}
-	users, err := p.client.GetUsers()
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("machine poll users: %w", err)
-	}
-	select {
-	case <-ctx.Done():
-		return Snapshot{}, ctx.Err()
-	default:
-	}
-	nodeSpec, err := model.NodeSpecFromPanelValidated(configSnapshot, p.kcfg)
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("machine poll normalize: %w", err)
-	}
-	return Snapshot{Config: nodeSpec, Users: model.UserSpecsFromPanel(users)}, nil
+	return Snapshot{}, fmt.Errorf("polling disabled in WS-only mode")
 }
 
 func (p *MachinePanelControlPlane) Report(payload ReportPayload) error {
-	return p.client.Report(
-		payload.Traffic, payload.Alive, payload.Online,
-		payload.CPU, payload.Mem, payload.Swap, payload.Disk,
-		payload.Metrics,
-	)
+	if p.push == nil {
+		return fmt.Errorf("ws not connected")
+	}
+	return p.push.SendReport(payload)
 }
 
 func (p *MachinePanelControlPlane) ReportDevices(push PushClient, devices map[int][]string) {
@@ -130,6 +121,5 @@ func (p *MachinePanelControlPlane) ReportDevices(push PushClient, devices map[in
 }
 
 func (p *MachinePanelControlPlane) Metrics() APIMetrics {
-	api := p.client.SnapshotMetrics()
-	return APIMetrics{Success: api.Success, Failure: api.Failure}
+	return APIMetrics{}
 }
