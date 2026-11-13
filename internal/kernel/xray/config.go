@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/fearless743/fboard-node/internal/config"
 	"github.com/fearless743/fboard-node/internal/kernel"
@@ -418,26 +419,43 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 
 // userEmailCache caches "user@<id>" strings to avoid repeated allocations.
 // Index = userID. Grows on demand, never shrinks (user IDs are stable).
-var userEmailCache []string
+//
+// The cache is process-wide because several panel instances can run xray
+// kernels in one process; the mutex keeps concurrent Start/Reload calls from
+// racing on the slice (which would otherwise grow it inconsistently and can
+// panic under load).
+var (
+	userEmailMu    sync.RWMutex
+	userEmailCache []string
+)
 
 // userEmail returns the stats-tracking email for a user.
 // Format: "user@<id>" so we can parse back the user ID from stats counters.
 // Results are cached per userID to avoid per-build allocations.
 func userEmail(userID int) string {
-	if userID >= 0 && userID < len(userEmailCache) {
+	if userID < 0 {
+		return "user@" + strconv.Itoa(userID)
+	}
+
+	userEmailMu.RLock()
+	if userID < len(userEmailCache) {
 		if s := userEmailCache[userID]; s != "" {
+			userEmailMu.RUnlock()
 			return s
 		}
 	}
+	userEmailMu.RUnlock()
+
 	s := "user@" + strconv.Itoa(userID)
-	if userID >= 0 {
-		if userID >= len(userEmailCache) {
-			newCache := make([]string, userID+1)
-			copy(newCache, userEmailCache)
-			userEmailCache = newCache
-		}
-		userEmailCache[userID] = s
+
+	userEmailMu.Lock()
+	if userID >= len(userEmailCache) {
+		newCache := make([]string, userID+1)
+		copy(newCache, userEmailCache)
+		userEmailCache = newCache
 	}
+	userEmailCache[userID] = s
+	userEmailMu.Unlock()
 	return s
 }
 

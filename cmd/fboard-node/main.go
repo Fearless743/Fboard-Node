@@ -59,6 +59,37 @@ func main() {
 // panel never takes down sibling instances.
 const instanceRetryInterval = 30 * time.Second
 
+// runIsolated runs fn and converts a panic into an error.
+//
+// A node process can host nodes for several panels; a panic caused by one
+// panel's WS traffic (or a bug in its orchestrator) must never crash the
+// process and stop the nodes of the other panels.
+func runIsolated(what string, fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			nlog.Core().Error("isolated component panicked",
+				"component", what,
+				"panic", fmt.Sprint(r),
+				"stack", string(debug.Stack()),
+			)
+			err = fmt.Errorf("%s panicked: %v", what, r)
+		}
+	}()
+	return fn()
+}
+
+// runInstanceIsolated supervises a single panel instance's orchestrator.
+// The supervisor retries the instance on error, including recovered panics.
+func runInstanceIsolated(ctx context.Context, cfg *config.Config) error {
+	what := "instance " + cfg.InstanceID
+	if cfg.Machine != nil {
+		what = fmt.Sprintf("instance %s (machine %d)", cfg.InstanceID, cfg.Machine.MachineID)
+	}
+	return runIsolated(what, func() error {
+		return machine.New(cfg).Run(ctx)
+	})
+}
+
 // shutdownTimeout bounds the whole shutdown sequence after the first
 // termination signal.
 //
@@ -181,8 +212,7 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 						"machine_id", instanceCfg.Machine.MachineID,
 						"panel_url", instanceCfg.Panel.URL,
 					)
-					orch := machine.New(instanceCfg)
-					if err := orch.Run(ctx); err != nil {
+					if err := runInstanceIsolated(ctx, instanceCfg); err != nil {
 						// Panel-side failure (e.g. unreachable panel during
 						// initial discovery): keep siblings alive and retry
 						// with backoff until shutdown.

@@ -402,3 +402,77 @@ func TestWSClient_EmptyUsersFullSyncIsDelivered(t *testing.T) {
 		t.Fatalf("NodeID = %d, want 7", received[0].NodeID)
 	}
 }
+
+// TestWSClient_PanickingHandlerReconnects ensures a panic raised while
+// handling one panel's message cannot crash the node process (which would
+// stop the nodes of every other panel instance). The client must drop that
+// connection and reconnect instead.
+func TestWSClient_PanickingHandlerReconnects(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	var mu sync.Mutex
+	connectCount := 0
+
+	configData, _ := json.Marshal(syncConfigPayload{
+		Config:    NodeConfig{Protocol: "vless", ServerPort: 443},
+		Timestamp: 1,
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		mu.Lock()
+		connectCount++
+		count := connectCount
+		mu.Unlock()
+
+		conn.WriteJSON(wsMessage{Event: "auth.success"})
+		// Every connection triggers the panicking handler.
+		conn.WriteJSON(wsMessage{Event: WSEventSyncConfig, Data: configData})
+		if count == 1 {
+			time.Sleep(100 * time.Millisecond)
+			return // client should have dropped the connection after the panic
+		}
+		for {
+			var msg wsMessage
+			if err := conn.ReadJSON(&msg); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "http://")
+	ws := NewWSClient("ws://"+host, "panic-token", 1, WSClientConfig{
+		MachineID:      9,
+		BackoffInitial: 10 * time.Millisecond,
+		BackoffMax:     50 * time.Millisecond,
+	}, func(WSEvent) {
+		panic("handler exploded")
+	}, nil, func() map[string]interface{} { return nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go ws.Run(ctx)
+
+	deadline := time.After(4 * time.Second)
+	for {
+		mu.Lock()
+		n := connectCount
+		mu.Unlock()
+		if n >= 2 {
+			return // panic contained, client reconnected
+		}
+		select {
+		case <-deadline:
+			mu.Lock()
+			t.Fatalf("client did not reconnect after handler panic; connections=%d", connectCount)
+			mu.Unlock()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}

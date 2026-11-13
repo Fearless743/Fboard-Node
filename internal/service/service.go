@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -577,6 +578,15 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 			}
 		}
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.log().Error("remote upgrade panicked",
+						"panic", fmt.Sprint(r),
+						"stack", string(debug.Stack()),
+					)
+					ack("failed", fmt.Sprintf("upgrade panicked: %v", r))
+				}
+			}()
 			fbctl := opsutil.ResolveFbctl()
 			if fbctl == "" {
 				s.log().Error("remote upgrade failed: fbctl not found in PATH or /usr/{local/,}{bin,sbin}/fbctl")
@@ -1104,6 +1114,14 @@ func (s *Service) pushReportAsync() {
 
 	go func() {
 		defer s.pushActive.Store(false)
+		defer func() {
+			if r := recover(); r != nil {
+				s.log().Error("report push panicked",
+					"panic", fmt.Sprint(r),
+					"stack", string(debug.Stack()),
+				)
+			}
+		}()
 		if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
 			s.log().Debug("report skipped (ws not connected)")
 			if len(traffic) > 0 {
@@ -1136,6 +1154,15 @@ func (s *Service) pushReportSync() {
 
 	done := make(chan error, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log().Error("final report panicked",
+					"panic", fmt.Sprint(r),
+					"stack", string(debug.Stack()),
+				)
+				done <- fmt.Errorf("final report panicked: %v", r)
+			}
+		}()
 		done <- s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics})
 	}()
 

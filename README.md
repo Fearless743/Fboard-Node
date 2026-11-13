@@ -98,6 +98,15 @@ sudo fboard-node -c /etc/fboard-node/config.yml
 
 仅支持机器模式配置。详见 `config.yml.example`；旧 node 配置请用 `migrate-from-xboard-node.sh` 迁移。
 
+### 多实例（单进程绑定多个面板）
+
+`instances:` 中的每个条目都是独立的 machine 实例，拥有自己的 WS 连接、节点集合和 xray 内核：
+
+- 某个面板的 WS 连不上或断开时，只影响该实例的节点发现与数据上报；已启动的节点内核继续提供服务
+- 同一进程内其他面板实例的节点不受影响
+- 某个实例内部的 panic（WS 消息处理、节点服务、内核生命周期等）会被隔离并记录日志，由该实例的 supervisor 自动重连/重试，不会让整个进程退出
+
+
 ## 扩展
 
 - 自定义路由: [docs-custom-routes.md](docs-custom-routes.md)

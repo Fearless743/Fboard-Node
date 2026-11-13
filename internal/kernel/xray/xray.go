@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -753,7 +754,18 @@ func marshalConfig(cfg config.KernelConfig, nc *model.NodeSpec, users []model.Us
 // startWithTimeout runs instance.Start() with a bounded deadline.
 func startWithTimeout(inst *xrayCore.Instance, timeout time.Duration) error {
 	done := make(chan error, 1)
-	go func() { done <- inst.Start() }()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				nlog.Core().Error("xray: instance start panicked",
+					"panic", fmt.Sprint(r),
+					"stack", string(debug.Stack()),
+				)
+				done <- fmt.Errorf("start xray panicked: %v", r)
+			}
+		}()
+		done <- inst.Start()
+	}()
 
 	select {
 	case err := <-done:
@@ -775,6 +787,16 @@ func closeOld(inst *xrayCore.Instance, ld *LimitDispatcher) {
 		return
 	}
 	go func() {
+		// Never let a recycle failure (or a panic in xray teardown) crash the
+		// process: other panel instances' kernels keep running here.
+		defer func() {
+			if r := recover(); r != nil {
+				nlog.Core().Error("xray: old instance recycle panicked",
+					"panic", fmt.Sprint(r),
+					"stack", string(debug.Stack()),
+				)
+			}
+		}()
 		// 1. Drain connections gracefully (best effort, e.g. 5 minutes)
 		// We use a much longer timeout here than the default Stop() because
 		// it's running in background and doesn't block new user connections.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -233,10 +234,31 @@ func (w *WSClient) IsConnected() bool { return w.connected.Load() }
 // SetOnAuth registers the callback for WS auth.success (initial machine state).
 func (w *WSClient) SetOnAuth(fn func(AuthInfo)) { w.onAuth = fn }
 
-func (w *WSClient) notifyStatus(connected bool) {
-	if w.onStatus != nil {
-		w.onStatus(WSStatusChange{Connected: connected})
+// recoverPanic converts a panic raised while handling panel data into a log
+// line. A single node process may host several panel instances; a malformed
+// message or a buggy callback for one panel must never take the whole process
+// (and thus the kernels of the other panels) down with it.
+//
+// Callers that want the connection rebuilt after a panic should also drop it;
+// recovering alone leaves the WS loop running with stale per-connection state.
+func recoverPanic(where string) {
+	r := recover()
+	if r == nil {
+		return
 	}
+	nlog.Core().Error("ws: recovered panic",
+		"where", where,
+		"panic", fmt.Sprint(r),
+		"stack", string(debug.Stack()),
+	)
+}
+
+func (w *WSClient) notifyStatus(connected bool) {
+	if w.onStatus == nil {
+		return
+	}
+	defer recoverPanic("status callback")
+	w.onStatus(WSStatusChange{Connected: connected})
 }
 
 // parseAuthSuccess converts an auth.success message into AuthInfo.
@@ -263,6 +285,7 @@ func (w *WSClient) emitAuth(msg wsMessage) {
 	if w.onAuth == nil {
 		return
 	}
+	defer recoverPanic("auth callback")
 	w.onAuth(parseAuthSuccess(msg))
 }
 
@@ -271,7 +294,7 @@ func (w *WSClient) Run(ctx context.Context) {
 	backoff := w.cfg.BackoffInitial
 	for {
 		start := time.Now()
-		err := w.connect(ctx)
+		err := w.safeConnect(ctx)
 
 		wasConnected := w.connected.Swap(false)
 		if wasConnected {
@@ -311,6 +334,22 @@ func (w *WSClient) Run(ctx context.Context) {
 			backoff = min(backoff*2, w.cfg.BackoffMax)
 		}
 	}
+}
+
+// safeConnect runs one connection attempt, turning a panic into an ordinary
+// error so the reconnect/backoff loop keeps running instead of crashing the
+// process (and every other panel instance hosted by it).
+func (w *WSClient) safeConnect(ctx context.Context) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			nlog.Core().Error("ws: recovered panic during connect",
+				"panic", fmt.Sprint(r),
+				"stack", string(debug.Stack()),
+			)
+			err = fmt.Errorf("panic during connect: %v", r)
+		}
+	}()
+	return w.connect(ctx)
 }
 
 func (w *WSClient) connect(ctx context.Context) error {
@@ -395,6 +434,20 @@ func (w *WSClient) connect(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		// Last-resort guard: a panic anywhere in the read path must not take
+		// the process down. The connection is abandoned and Run reconnects.
+		defer func() {
+			if r := recover(); r != nil {
+				nlog.Core().Error("ws: recovered panic in read loop",
+					"panic", fmt.Sprint(r),
+					"stack", string(debug.Stack()),
+				)
+				select {
+				case errCh <- fmt.Errorf("panic in read loop: %v", r):
+				default:
+				}
+			}
+		}()
 		for {
 			var msg wsMessage
 			if err := conn.ReadJSON(&msg); err != nil {
@@ -405,7 +458,15 @@ func (w *WSClient) connect(ctx context.Context) error {
 				return
 			}
 			nlog.Core().Debug("ws recv", "event", msg.Event, "data", string(msg.Data))
-			w.handleMessage(msg)
+			if !w.dispatch(msg) {
+				// Handler panicked: drop this connection so state is rebuilt
+				// from a fresh full-sync on reconnect.
+				select {
+				case errCh <- fmt.Errorf("event handler panicked: %s", msg.Event):
+				default:
+				}
+				return
+			}
 			if msg.Event == "ping" {
 				select {
 				case writeCh <- wsMessage{Event: "pong"}:
@@ -432,7 +493,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 			// Send periodic node.status via WebSocket
 			if w.onPing != nil {
 				msg := wsMessage{Event: "node.status"}
-				if stats := w.onPing(); stats != nil {
+				if stats := safePing(w.onPing); stats != nil {
 					data, _ := json.Marshal(stats)
 					msg.Data = data
 					msg.Timestamp = time.Now().Unix()
@@ -453,6 +514,32 @@ func (w *WSClient) connect(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// dispatch hands one message to the consumer callback with panic isolation.
+// It returns false when the callback panicked, so the caller can drop the
+// connection and reconnect instead of continuing with possibly inconsistent
+// state (and so one panel cannot crash the whole node process).
+func (w *WSClient) dispatch(msg wsMessage) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			nlog.Core().Error("ws: recovered panic in event handler",
+				"event", msg.Event,
+				"panic", fmt.Sprint(r),
+				"stack", string(debug.Stack()),
+			)
+			ok = false
+		}
+	}()
+	w.handleMessage(msg)
+	return true
+}
+
+// safePing calls the status callback with panic isolation; a broken callback
+// yields no stats for this tick instead of killing the process.
+func safePing(fn func() map[string]interface{}) (stats map[string]interface{}) {
+	defer recoverPanic("ping callback")
+	return fn()
 }
 
 func (w *WSClient) handleMessage(msg wsMessage) {

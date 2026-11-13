@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,9 +121,24 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			return nil
 
 		case <-statusTicker.C:
-			o.reportMachineStatus()
+			o.safeReportMachineStatus()
 		}
 	}
+}
+
+// safeReportMachineStatus isolates a panic in the periodic machine.status
+// report. Losing one report is harmless; crashing the process would stop the
+// nodes of every panel instance on this host.
+func (o *Orchestrator) safeReportMachineStatus() {
+	defer func() {
+		if r := recover(); r != nil {
+			o.log().Error("machine: status report panicked",
+				"panic", fmt.Sprint(r),
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	o.reportMachineStatus()
 }
 
 // ─── Node lifecycle ──────────────────────────────────────────────────────
@@ -185,11 +201,29 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	go func() {
 		defer close(done)
 		defer o.unregisterNode(mn.ID)
-		if err := svc.Run(nodeCtx); err != nil {
+		if err := o.runNodeService(nodeCtx, mn.ID, svc.Run); err != nil {
 			o.log().Error("machine node exited with error",
 				"node_id", mn.ID, "error", err)
 		}
 	}()
+}
+
+// runNodeService runs a node service and converts a panic into a logged
+// error. The node process hosts nodes for every configured panel instance, so
+// a fault in one node/panel must not crash the process or stop the kernels of
+// the other panels.
+func (o *Orchestrator) runNodeService(ctx context.Context, nodeID int, run func(context.Context) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			o.log().Error("machine: node service panicked",
+				"node_id", nodeID,
+				"panic", fmt.Sprint(r),
+				"stack", string(debug.Stack()),
+			)
+			err = fmt.Errorf("node %d service panicked: %v", nodeID, r)
+		}
+	}()
+	return run(ctx)
 }
 
 func (o *Orchestrator) stopNode(nodeID int) {
@@ -522,6 +556,15 @@ func (o *Orchestrator) handleRemoteUpgrade(version, checksum string) {
 	}
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				o.log().Error("remote upgrade panicked",
+					"panic", fmt.Sprint(r),
+					"stack", string(debug.Stack()),
+				)
+				ack("failed", fmt.Sprintf("upgrade panicked: %v", r))
+			}
+		}()
 		fbctl := resolveFbctl()
 		if fbctl == "" {
 			o.log().Error("remote upgrade failed: fbctl not found in PATH or /usr/{local/,}{bin,sbin}/fbctl")
@@ -569,6 +612,16 @@ func (o *Orchestrator) handleRemoteKernel(action string) {
 	}
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				o.log().Error("remote kernel op panicked",
+					"action", action,
+					"panic", fmt.Sprint(r),
+					"stack", string(debug.Stack()),
+				)
+				ack("failed", fmt.Sprintf("kernel.%s panicked: %v", action, r))
+			}
+		}()
 		okCount, failCount, detail := o.controlAllKernels(action)
 		// Push fresh kernel aggregate so the admin UI can refresh button state
 		// without waiting for the next status ticker.
