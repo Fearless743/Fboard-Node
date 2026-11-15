@@ -31,11 +31,24 @@ type MachineNode struct {
 	Name string `json:"name"`
 }
 
+// MachineNodesResponse is returned by POST /api/v2/server/machine/nodes.
+type MachineNodesResponse struct {
+	Nodes      []MachineNode     `json:"nodes"`
+	BaseConfig MachineBaseConfig `json:"base_config"`
+}
+
+// MachineBaseConfig holds polling intervals for machine mode.
+type MachineBaseConfig struct {
+	PushInterval int `json:"push_interval"`
+	PullInterval int `json:"pull_interval"`
+}
+
 // AuthInfo carries the initial machine state from WS auth.success.
 type AuthInfo struct {
 	MachineID    int
 	Nodes        []MachineNode
 	PushInterval int
+	PullInterval int
 }
 
 // BaseConfig holds node-level intervals (legacy; kept for WS payload compat).
@@ -54,7 +67,12 @@ type NodeConfig struct {
 	Network         string                 `json:"network"`
 	NetworkSettings map[string]interface{} `json:"networkSettings"`
 	BaseConfig      BaseConfig             `json:"base_config"`
-	Routes          []RouteRule            `json:"routes"`
+	// MaintenanceMode is set by the panel when the whole service is in
+	// maintenance. It is intentionally NOT mapped into model.NodeSpec: it must
+	// never participate in the kernel config hash (toggling maintenance must
+	// not restart inbounds).
+	MaintenanceMode bool        `json:"maintenance_mode,omitempty"`
+	Routes          []RouteRule `json:"routes"`
 
 	// Kernel settings (Fboard extension)
 	KernelLogLevel   string            `json:"kernel_log_level,omitempty"` // "info", "warn", etc.

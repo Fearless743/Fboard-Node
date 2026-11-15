@@ -268,7 +268,7 @@ func TestXrayUpdateUsersLimitOnlyRefreshesDispatcherAndBandwidth(t *testing.T) {
 	}
 }
 
-func TestXrayRemoveUsersStopsKernelWhenLastUserRemoved(t *testing.T) {
+func TestXrayRemoveUsersRefusesToStopKernelWhenLastUserRemoved(t *testing.T) {
 	x := New(config.KernelConfig{})
 	x.instance = new(xrayCore.Instance)
 	ld := newTestDispatcher()
@@ -276,14 +276,25 @@ func TestXrayRemoveUsersStopsKernelWhenLastUserRemoved(t *testing.T) {
 	x.users = []model.UserSpec{{ID: 1, UUID: "uuid-1"}}
 	x.running.Store(true)
 
-	removed, err := x.RemoveUsers([]model.UserSpec{{ID: 1, UUID: "uuid-1"}})
-	if err != nil {
-		t.Fatalf("RemoveUsers() error = %v", err)
+	_, err := x.RemoveUsers([]model.UserSpec{{ID: 1, UUID: "uuid-1"}})
+	if err == nil {
+		t.Fatal("expected RemoveUsers to refuse empty result")
 	}
-	if removed != 1 {
-		t.Fatalf("removed = %d, want 1", removed)
+	if !x.IsRunning() {
+		t.Fatal("RemoveUsers must not stop the kernel implicitly")
 	}
-	if x.IsRunning() {
-		t.Fatal("expected xray to stop when last user is removed")
+}
+
+func TestXrayUpdateUsersRefusesEmptySet(t *testing.T) {
+	x := New(config.KernelConfig{})
+	x.instance = new(xrayCore.Instance)
+	x.users = []model.UserSpec{{ID: 1, UUID: "uuid-1"}}
+	x.running.Store(true)
+
+	if _, _, err := x.UpdateUsers(nil); err == nil {
+		t.Fatal("expected UpdateUsers to refuse an empty user set")
+	}
+	if !x.IsRunning() {
+		t.Fatal("UpdateUsers must not stop the kernel")
 	}
 }

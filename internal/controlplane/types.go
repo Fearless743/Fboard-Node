@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"time"
 
 	"github.com/fearless743/fboard-node/internal/model"
 )
@@ -19,6 +20,7 @@ const (
 
 type Event struct {
 	Type        EventType
+	Source      string // "ws" or "rest"; empty is treated as "ws"
 	Config      *model.NodeSpec
 	Users       []model.UserSpec
 	DeltaAction string
@@ -27,6 +29,9 @@ type Event struct {
 	// UpgradeChecksum is the optional panel-supplied sha256 of the release
 	// archive for sync.upgrade (empty = panel did not send one).
 	UpgradeChecksum string
+	// Maintenance reports panel maintenance mode. It is deliberately separate
+	// from Config so toggling maintenance never changes the kernel hash.
+	Maintenance bool
 }
 
 type StatusChange struct {
@@ -45,23 +50,33 @@ type Bootstrap struct {
 	Push         PushClient
 	Config       *model.NodeSpec
 	Users        []model.UserSpec
+	Maintenance  bool
 	Mailbox      *NodeMailbox
 }
 
+// Snapshot is the result of one REST poll. Changed flags distinguish "not
+// modified" (nil / 304) from "explicitly empty" (non-nil empty slice).
 type Snapshot struct {
-	Config *model.NodeSpec
-	Users  []model.UserSpec
+	Config        *model.NodeSpec
+	Users         []model.UserSpec
+	ConfigChanged bool
+	UsersChanged  bool
+	Maintenance   bool
+	PolledAt      time.Time
 }
 
 type ReportPayload struct {
-	Traffic map[int][2]int64
-	Alive   map[int][]string
-	Online  map[int]int
-	CPU     float64
-	Mem     [2]uint64
-	Swap    [2]uint64
-	Disk    [2]uint64
-	Metrics map[string]interface{}
+	// ReportID is an idempotency key for REST reporting. Retries of the same
+	// report must reuse the same ID so the panel cannot double-count traffic.
+	ReportID string
+	Traffic  map[int][2]int64
+	Alive    map[int][]string
+	Online   map[int]int
+	CPU      float64
+	Mem      [2]uint64
+	Swap     [2]uint64
+	Disk     [2]uint64
+	Metrics  map[string]interface{}
 }
 
 type PushClient interface {
@@ -88,7 +103,7 @@ type Source interface {
 }
 
 type Sink interface {
-	Report(payload ReportPayload) error
+	Report(ctx context.Context, payload ReportPayload) error
 	ReportDevices(push PushClient, devices map[int][]string)
 	SupportsReporting() bool
 	SupportsDeviceReports() bool

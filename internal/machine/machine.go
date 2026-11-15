@@ -1,5 +1,7 @@
 // Package machine implements the machine-mode orchestrator that manages node
-// lifecycles over a single shared WebSocket connection (WS-only, no REST).
+// lifecycles. REST is the baseline (node discovery, config/users, reporting);
+// a shared WebSocket connection carries realtime deltas, device state and
+// remote control events.
 package machine
 
 import (
@@ -12,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fearless743/fboard-node/internal/buildinfo"
@@ -33,10 +36,10 @@ type nodeHandle struct {
 }
 
 // Orchestrator manages all nodes bound to a panel machine. It:
-//   - learns nodes from WS auth.success / sync.nodes
+//   - discovers nodes via REST polling and WS auth.success / sync.nodes
 //   - starts / stops Service instances as nodes are added / removed
-//   - maintains a shared WS connection that demuxes events by node_id
-//   - reports machine-level load via WS machine.status
+//   - maintains a shared WS connection that demuxes realtime events by node_id
+//   - reports machine-level load via REST, falling back to WS when needed
 type Orchestrator struct {
 	cfg       *config.Config
 	panelURL  string
@@ -46,6 +49,12 @@ type Orchestrator struct {
 
 	mu    sync.Mutex
 	nodes map[int]*nodeHandle // node_id → handle
+
+	// pendingNodeRemovals counts consecutive REST polls that omitted a node.
+	// A node is only stopped after the removal is confirmed (or when the panel
+	// explicitly sends sync.nodes over WS). This prevents a transient empty/
+	// partial REST response from stopping live kernels.
+	pendingNodeRemovals map[int]int
 
 	// Per-node mailbox keyed by node_id. Shared WS events are aggregated here
 	// and each node service drains the latest state when ready.
@@ -57,11 +66,20 @@ type Orchestrator struct {
 	ws       *panel.WSClient
 	wsCancel context.CancelFunc
 
-	// runCtx is stored from Run() so that onWSEvent can trigger rediscover
-	// for sync.nodes events without blocking the main loop.
+	// Shared machine-scoped REST client. Per-node clients are derived with
+	// rest.ForNode(nodeID).
+	rest *panel.Client
+
+	// runCtx is stored from Run() so callbacks can derive bounded contexts.
 	runCtx context.Context
 
+	intervalsMu  sync.RWMutex
 	pushInterval time.Duration
+	pullInterval time.Duration
+
+	// lastWSNodesAt guards against a REST discovery response that started
+	// before a newer WS sync.nodes event being applied afterwards.
+	lastWSNodesAt atomic.Int64
 }
 
 // New creates a machine orchestrator from the given config.
@@ -72,15 +90,22 @@ func New(cfg *config.Config) *Orchestrator {
 		machineID = cfg.Machine.MachineID
 		token = cfg.Machine.Token
 	}
+	panelCfg := cfg.Panel
+	panelCfg.Token = token
+	panelCfg.MachineID = machineID
 	return &Orchestrator{
-		cfg:       cfg,
-		panelURL:  cfg.Panel.URL,
-		token:     token,
-		machineID: machineID,
-		wsURL:     panel.DeriveWSURL(cfg.Panel.URL, cfg.WS.URL),
-		nodes:     make(map[int]*nodeHandle),
-		mailboxes: make(map[int]*controlplane.NodeMailbox),
-		statuses:  make(map[int]chan<- controlplane.StatusChange),
+		cfg:                 cfg,
+		panelURL:            cfg.Panel.URL,
+		token:               token,
+		machineID:           machineID,
+		wsURL:               panel.DeriveWSURL(cfg.Panel.URL, cfg.WS.URL),
+		nodes:               make(map[int]*nodeHandle),
+		pendingNodeRemovals: make(map[int]int),
+		mailboxes:           make(map[int]*controlplane.NodeMailbox),
+		statuses:            make(map[int]chan<- controlplane.StatusChange),
+		rest:                panel.NewClient(panelCfg),
+		pushInterval:        60 * time.Second,
+		pullInterval:        60 * time.Second,
 	}
 }
 
@@ -95,23 +120,34 @@ func (o *Orchestrator) log() *nlog.NodeLog {
 // Run is the main loop. It blocks until ctx is cancelled.
 func (o *Orchestrator) Run(ctx context.Context) error {
 	o.runCtx = ctx
-	if o.wsURL == "" {
-		return fmt.Errorf("cannot derive WS url from panel.url %q", o.panelURL)
-	}
 	if o.machineID <= 0 || o.token == "" {
 		return fmt.Errorf("machine.machine_id and machine.token are required")
 	}
-
-	o.pushInterval = 60 * time.Second
-	if o.cfg.Node.PushInterval > 0 {
-		o.pushInterval = time.Duration(o.cfg.Node.PushInterval) * time.Second
+	if o.panelURL == "" {
+		return fmt.Errorf("panel.url is required")
 	}
 
-	// Start machine-level WS; node discovery arrives via auth.success.
-	o.startWS(ctx)
-	o.log().Info(fmt.Sprintf("machine %d: ws connecting to %s", o.machineID, o.wsURL))
+	if o.cfg.Node.PushInterval > 0 {
+		o.setIntervals(time.Duration(o.cfg.Node.PushInterval)*time.Second, o.getPullInterval())
+	}
+	if o.cfg.Node.PullInterval > 0 {
+		o.setIntervals(o.getPushInterval(), time.Duration(o.cfg.Node.PullInterval)*time.Second)
+	}
 
-	statusTicker := time.NewTicker(o.pushInterval)
+	// REST discovery is the baseline and works even when the panel's WS
+	// server is unavailable. WS still provides immediate node list updates.
+	go o.discoveryLoop(ctx)
+
+	// Start machine-level WS when a URL is available. Failure to connect is
+	// non-fatal now: REST keeps config/users/reporting alive.
+	if o.wsURL != "" {
+		o.startWS(ctx)
+		o.log().Info(fmt.Sprintf("machine %d: ws connecting to %s", o.machineID, o.wsURL))
+	} else {
+		o.log().Warn("machine: cannot derive ws url; continuing in REST-only mode", "panel_url", o.panelURL)
+	}
+
+	statusTicker := time.NewTicker(o.getPushInterval())
 	defer statusTicker.Stop()
 
 	for {
@@ -122,6 +158,95 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 		case <-statusTicker.C:
 			o.safeReportMachineStatus()
+		}
+	}
+}
+
+func (o *Orchestrator) setIntervals(push, pull time.Duration) {
+	if push < 5*time.Second {
+		push = 5 * time.Second
+	}
+	if pull < 5*time.Second {
+		pull = 5 * time.Second
+	}
+	o.intervalsMu.Lock()
+	o.pushInterval = push
+	o.pullInterval = pull
+	o.intervalsMu.Unlock()
+}
+
+func (o *Orchestrator) getPushInterval() time.Duration {
+	o.intervalsMu.RLock()
+	defer o.intervalsMu.RUnlock()
+	return o.pushInterval
+}
+
+func (o *Orchestrator) getPullInterval() time.Duration {
+	o.intervalsMu.RLock()
+	defer o.intervalsMu.RUnlock()
+	return o.pullInterval
+}
+
+// discoveryLoop polls the machine's node list over REST. WS sync.nodes still
+// applies immediately; this loop is the baseline that recovers from missed WS
+// events and works when the panel's WS server is disabled.
+func (o *Orchestrator) discoveryLoop(ctx context.Context) {
+	if o.rest == nil {
+		return
+	}
+	failures := 0
+	for {
+		started := time.Now()
+		reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		resp, err := o.rest.GetMachineNodes(reqCtx)
+		cancel()
+
+		if err != nil {
+			failures++
+			o.log().Warn("machine: REST node discovery failed",
+				"error", err, "consecutive_failures", failures)
+		} else {
+			failures = 0
+			if resp.BaseConfig.PushInterval > 0 || resp.BaseConfig.PullInterval > 0 {
+				push := o.getPushInterval()
+				pull := o.getPullInterval()
+				// Explicit YAML values win over panel defaults. Only adopt the
+				// panel interval when the operator did not set one.
+				if o.cfg.Node.PushInterval > 0 {
+					push = time.Duration(o.cfg.Node.PushInterval) * time.Second
+				} else if resp.BaseConfig.PushInterval > 0 {
+					push = time.Duration(resp.BaseConfig.PushInterval) * time.Second
+				}
+				if o.cfg.Node.PullInterval > 0 {
+					pull = time.Duration(o.cfg.Node.PullInterval) * time.Second
+				} else if resp.BaseConfig.PullInterval > 0 {
+					pull = time.Duration(resp.BaseConfig.PullInterval) * time.Second
+				}
+				o.setIntervals(push, pull)
+			}
+			// Do not let a discovery response that started before a newer WS
+			// sync.nodes overwrite that explicit list.
+			if o.lastWSNodesAt.Load() <= started.UnixNano() {
+				o.applyNodes(resp.Nodes, "rest")
+			} else {
+				o.log().Debug("machine: skipping stale REST node list (newer ws sync.nodes applied)")
+			}
+		}
+
+		wait := o.getPullInterval()
+		if failures > 0 {
+			backoff := wait * time.Duration(1<<min(failures, 4))
+			if backoff > 5*wait {
+				backoff = 5 * wait
+			}
+			if backoff > wait {
+				wait = backoff
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
 		}
 	}
 }
@@ -185,8 +310,14 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 		return mb
 	}
 
-	pushInterval := int(o.pushInterval / time.Second)
-	cp := controlplane.NewMachinePanelControlPlane(nodeCfg.Kernel, push, pushInterval, registerFn)
+	var rest *panel.Client
+	if o.rest != nil {
+		rest = o.rest.ForNode(mn.ID)
+	}
+
+	pushInterval := int(o.getPushInterval() / time.Second)
+	pullInterval := int(o.getPullInterval() / time.Second)
+	cp := controlplane.NewMachinePanelControlPlane(nodeCfg.Kernel, push, rest, pushInterval, pullInterval, registerFn)
 	svc := service.NewWithControlPlane(nodeCfg, cp)
 
 	o.mu.Lock()
@@ -267,20 +398,46 @@ func (o *Orchestrator) stopAll() {
 	}
 }
 
-// ─── Node discovery (WS-driven) ──────────────────────────────────────────
+// ─── Node discovery (REST + WS) ──────────────────────────────────────────
 
 // applyNodes reconciles running nodes with the latest panel-provided list.
-func (o *Orchestrator) applyNodes(nodes []panel.MachineNode) {
+// source is "ws" (explicit panel push) or "rest" (periodic observation).
+// REST removals require two consecutive confirmations so a transient empty or
+// partial response cannot stop every kernel on the machine.
+func (o *Orchestrator) applyNodes(nodes []panel.MachineNode, source string) {
 	wanted := make(map[int]panel.MachineNode, len(nodes))
 	for _, n := range nodes {
 		wanted[n.ID] = n
+	}
+	confirmations := 1
+	if source == "rest" {
+		confirmations = 2
+		// An empty list is the most dangerous response: require one more poll
+		// before stopping everything.
+		if len(nodes) == 0 {
+			confirmations = 3
+		}
 	}
 
 	o.mu.Lock()
 	var toRemove []int
 	for id := range o.nodes {
-		if _, ok := wanted[id]; !ok {
+		if _, ok := wanted[id]; ok {
+			delete(o.pendingNodeRemovals, id)
+			continue
+		}
+		if confirmations <= 1 {
 			toRemove = append(toRemove, id)
+			delete(o.pendingNodeRemovals, id)
+			continue
+		}
+		o.pendingNodeRemovals[id]++
+		if o.pendingNodeRemovals[id] >= confirmations {
+			toRemove = append(toRemove, id)
+			delete(o.pendingNodeRemovals, id)
+		} else {
+			o.log().Warn("machine: node missing from REST discovery, awaiting confirmation",
+				"node_id", id, "polls", o.pendingNodeRemovals[id])
 		}
 	}
 	o.mu.Unlock()
@@ -288,21 +445,6 @@ func (o *Orchestrator) applyNodes(nodes []panel.MachineNode) {
 	for _, id := range toRemove {
 		o.stopNode(id)
 	}
-
-	// Clean up any orphaned mailbox/status entries for nodes that are no
-	// longer part of this machine.
-	o.eventsMu.Lock()
-	for id := range o.mailboxes {
-		if _, ok := wanted[id]; !ok {
-			delete(o.mailboxes, id)
-		}
-	}
-	for id := range o.statuses {
-		if _, ok := wanted[id]; !ok {
-			delete(o.statuses, id)
-		}
-	}
-	o.eventsMu.Unlock()
 
 	ctx := o.runCtx
 	if ctx == nil {
@@ -316,10 +458,8 @@ func (o *Orchestrator) applyNodes(nodes []panel.MachineNode) {
 // ─── Machine status reporting (WS) ───────────────────────────────────────
 
 func (o *Orchestrator) reportMachineStatus() {
-	if o.ws == nil || !o.ws.IsConnected() {
-		return
-	}
 	s := monitor.Collect()
+	kernel := o.aggregateKernelStatus()
 	payload := map[string]interface{}{
 		"cpu":  s.CPU,
 		"mem":  map[string]interface{}{"total": s.MemTotal, "used": s.MemUsed},
@@ -332,8 +472,27 @@ func (o *Orchestrator) reportMachineStatus() {
 	if buildinfo.Version != "" {
 		payload["version"] = buildinfo.Version
 	}
-	payload["kernel"] = o.aggregateKernelStatus()
-	o.ws.SendMachineStatus(payload)
+	payload["kernel"] = kernel
+
+	if o.rest != nil {
+		ctx := o.runCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := o.rest.ReportMachineStatus(reqCtx, s.CPU, [2]uint64{s.MemTotal, s.MemUsed},
+			[2]uint64{s.SwapTotal, s.SwapUsed}, [2]uint64{s.DiskTotal, s.DiskUsed},
+			s.NetInSpeed, s.NetOutSpeed, buildinfo.Version, kernel)
+		cancel()
+		if err == nil {
+			return
+		}
+		o.log().Warn("machine: REST status report failed; falling back to ws", "error", err)
+	}
+
+	if o.ws != nil && o.ws.IsConnected() {
+		o.ws.SendMachineStatus(payload)
+	}
 }
 
 // aggregateKernelStatus summarizes embedded-kernel state across all node
@@ -420,12 +579,23 @@ func (o *Orchestrator) startWS(ctx context.Context) {
 
 // onWSAuth handles the initial node list from WS auth.success.
 func (o *Orchestrator) onWSAuth(auth panel.AuthInfo) {
-	if auth.PushInterval >= 10 {
-		o.pushInterval = time.Duration(auth.PushInterval) * time.Second
+	push := o.getPushInterval()
+	pull := o.getPullInterval()
+	if o.cfg.Node.PushInterval > 0 {
+		push = time.Duration(o.cfg.Node.PushInterval) * time.Second
+	} else if auth.PushInterval >= 5 {
+		push = time.Duration(auth.PushInterval) * time.Second
 	}
+	if o.cfg.Node.PullInterval > 0 {
+		pull = time.Duration(o.cfg.Node.PullInterval) * time.Second
+	} else if auth.PullInterval >= 5 {
+		pull = time.Duration(auth.PullInterval) * time.Second
+	}
+	o.setIntervals(push, pull)
+	o.lastWSNodesAt.Store(time.Now().UnixNano())
 	o.log().Info(fmt.Sprintf("machine %d: discovered %d nodes via WS",
 		o.machineID, len(auth.Nodes)))
-	o.applyNodes(auth.Nodes)
+	o.applyNodes(auth.Nodes, "ws")
 }
 
 // onWSEvent routes a WS event to the correct node's channel.
@@ -434,7 +604,8 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 	switch event.Type {
 	case panel.WSEventSyncNodes:
 		o.log().Info("machine received sync.nodes, reconciling")
-		o.applyNodes(event.Nodes)
+		o.lastWSNodesAt.Store(time.Now().UnixNano())
+		o.applyNodes(event.Nodes, "ws")
 		return
 
 	case panel.WSEventSyncLogs:

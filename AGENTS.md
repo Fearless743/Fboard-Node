@@ -9,7 +9,7 @@ Guidance for AI coding agents working in this repository.
 - `internal/machine/` — machine orchestrator (discovers nodes, shared WS)
 - `internal/service/` — per-node runtime (kernel lifecycle, traffic, certs)
 - `internal/controlplane/` — machine control plane + mailbox
-- `internal/panel/` — panel WebSocket client (WS-only, V2 machine auth)
+- `internal/panel/` — panel REST client + WebSocket client (REST baseline; WS realtime/control)
 - `internal/kernel/` — kernel interface + `xray/` adapter (only kernel)
 - `internal/config/` — YAML config (machine-only panel connection)
 - `internal/model/` — node/user specs and validation

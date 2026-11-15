@@ -445,8 +445,9 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 
 	if len(kept) == 0 {
 		x.mu.Unlock()
-		x.Stop()
-		return removed, nil
+		// Never stop the kernel as a side effect of a user update. Callers must
+		// use Stop() explicitly after confirming an intentional empty state.
+		return 0, fmt.Errorf("refusing to remove all users via RemoveUsers; caller must stop explicitly")
 	}
 
 	um, err := x.getUserManager()
@@ -490,6 +491,12 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
 	if x.instance == nil {
 		x.mu.Unlock()
 		return 0, 0, fmt.Errorf("not running")
+	}
+	if len(users) == 0 {
+		x.mu.Unlock()
+		// Empty user sets must go through an explicit Stop() so a transient
+		// panel response can never tear down a healthy inbound.
+		return 0, 0, fmt.Errorf("refusing to apply empty user set via UpdateUsers; caller must stop explicitly")
 	}
 	toAdd, toRemove := kernel.UserDiff(x.users, users)
 	added, removed = len(toAdd), len(toRemove)
@@ -557,6 +564,19 @@ var _ kernel.Kernel = (*Xray)(nil)
 // getUserManager extracts the UserManager from the running xray instance's
 // inbound handler. Must be called with x.mu held.
 // Returns error for protocols that don't support UserManager (socks, http).
+// SupportsHitlessUsers reports whether the running inbound supports atomic
+// add/remove of users. When false, user-set changes fall back to a kernel
+// restart and may briefly interrupt connections.
+func (x *Xray) SupportsHitlessUsers() bool {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.instance == nil {
+		return false
+	}
+	_, err := x.getUserManager()
+	return err == nil
+}
+
 func (x *Xray) getUserManager() (xrayProxy.UserManager, error) {
 	if x.instance == nil {
 		return nil, fmt.Errorf("instance is nil")

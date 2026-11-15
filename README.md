@@ -19,7 +19,7 @@ Node backend for [Fboard](https://github.com/Fearless743/Fboard). Based on [Xboa
 
 - 协议: VMess、VLESS、Trojan、Shadowsocks、Hysteria2、TUIC、AnyTLS、Naive、Mieru、SOCKS、HTTP
 - 内核: xray-core（单内核，已移除 sing-box / mihomo）
-- 同步: WebSocket 推送 + REST 轮询双通道
+- 同步: REST 轮询为基线（节点/配置/用户/上报），WebSocket 负责增量、实时设备状态和远程操作
 - 用户控制: 限速、设备限制、在线 IP 追踪、热更新
 - 部署模式: 机器模式（动态发现绑定节点）
 - 多实例: 单进程绑定多个面板机器
@@ -98,7 +98,15 @@ sudo fboard-node -c /etc/fboard-node/config.yml
 
 仅支持机器模式配置。详见 `config.yml.example`；旧 node 配置请用 `migrate-from-xboard-node.sh` 迁移。
 
-### 多实例（单进程绑定多个面板）
+## 通讯与稳定性
+
+- REST 为基线：`/api/v2/server/machine/nodes` 发现节点，`/api/v2/server/{config,user}` 拉取配置/用户（ETag + body hash 去重），`/api/v2/server/report` 上报流量/在线/状态/metrics，`/api/v2/server/machine/status` 上报机器负载。
+- WebSocket 仍保留：负责 `sync.user.delta`、`sync.devices`、`sync.nodes` 以及远程升级/重启/日志。
+- WS 正常时 REST 只做校验和上报，发现差异会请求面板重新 full-sync，不直接改配置/用户。
+- WS 断开时 REST 接管：配置变更需连续两次一致、用户删除需连续两次确认、空用户列表需维护模式或连续三次确认；任何单次异常响应都不会停止内核。
+- 流量上报带 `report_id`，面板侧幂等去重，避免响应丢失后重试导致重复计费。
+
+## 多实例（单进程绑定多个面板）
 
 `instances:` 中的每个条目都是独立的 machine 实例，拥有自己的 WS 连接、节点集合和 xray 内核：
 

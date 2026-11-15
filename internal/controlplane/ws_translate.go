@@ -13,6 +13,7 @@ import (
 func TranslateWSEvent(event panel.WSEvent, kcfg config.KernelConfig) (Event, error) {
 	translated := Event{Type: EventType(event.Type), DeltaAction: event.DeltaAction, DeviceUsers: event.DeviceUsers, UpgradeChecksum: event.UpgradeChecksum}
 	if event.Config != nil {
+		translated.Maintenance = event.Config.MaintenanceMode
 		var err error
 		translated.Config, err = model.NodeSpecFromPanelValidated(event.Config, kcfg)
 		if err != nil {

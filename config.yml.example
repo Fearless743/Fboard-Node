@@ -12,7 +12,8 @@ machine:
 # log:
 #   level: "info"
 # node:
-#   push_interval: 60
+#   push_interval: 60      # REST report interval (traffic/status/metrics)
+#   pull_interval: 60      # REST config/user reconciliation interval
 # ws:
 #   url: ""               # explicit WS endpoint override (default: derived from panel.url + /ws)
 #   status_interval: 10

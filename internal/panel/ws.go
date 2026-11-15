@@ -155,6 +155,7 @@ type authSuccessPayload struct {
 	Nodes      []MachineNode `json:"nodes"`
 	BaseConfig struct {
 		PushInterval int `json:"push_interval"`
+		PullInterval int `json:"pull_interval"`
 	} `json:"base_config"`
 }
 
@@ -278,6 +279,7 @@ func parseAuthSuccess(msg wsMessage) AuthInfo {
 		MachineID:    p.MachineID,
 		Nodes:        nodes,
 		PushInterval: p.BaseConfig.PushInterval,
+		PullInterval: p.BaseConfig.PullInterval,
 	}
 }
 

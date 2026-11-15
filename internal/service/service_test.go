@@ -13,6 +13,7 @@ import (
 	"github.com/fearless743/fboard-node/internal/kernel"
 	"github.com/fearless743/fboard-node/internal/limiter"
 	"github.com/fearless743/fboard-node/internal/model"
+	"github.com/fearless743/fboard-node/internal/panel"
 	"github.com/fearless743/fboard-node/internal/tracker"
 	"golang.org/x/time/rate"
 )
@@ -381,7 +382,7 @@ type blockingSink struct {
 	release chan struct{}
 }
 
-func (b *blockingSink) Report(controlplane.ReportPayload) error {
+func (b *blockingSink) Report(context.Context, controlplane.ReportPayload) error {
 	<-b.release
 	return nil
 }
@@ -419,10 +420,131 @@ func TestPushReportSyncDoesNotBlockShutdown(t *testing.T) {
 
 	budget := finalReportTimeout + 500*time.Millisecond
 	start := time.Now()
-	s.pushReportSync()
+	s.pushReportSync(context.Background())
 	elapsed := time.Since(start)
 
 	if elapsed > budget {
 		t.Fatalf("pushReportSync blocked for %v, want <= %v", elapsed, budget)
+	}
+}
+
+func TestRESTUsersDefersRemovalUntilConfirmed(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	s.lastConfig = &model.NodeSpec{Protocol: "vless"}
+	s.updateUserState([]model.UserSpec{
+		{ID: 1, UUID: "u1"},
+		{ID: 2, UUID: "u2"},
+	})
+
+	snap := controlplane.Snapshot{
+		Users:        []model.UserSpec{{ID: 1, UUID: "u1"}},
+		UsersChanged: true,
+		PolledAt:     time.Now(),
+	}
+	s.applyRESTUsers(context.Background(), snap)
+	if k.updateCalls != 0 {
+		t.Fatalf("removal before confirmation changed users (%d calls)", k.updateCalls)
+	}
+	if len(s.lastUsers) != 2 {
+		t.Fatalf("expected both users retained, got %#v", s.lastUsers)
+	}
+
+	s.applyRESTUsers(context.Background(), snap)
+	if k.updateCalls != 1 {
+		t.Fatalf("confirmed removal should update users once, got %d", k.updateCalls)
+	}
+	if len(s.lastUsers) != 1 || s.lastUsers[0].ID != 1 {
+		t.Fatalf("unexpected users after confirmed removal: %#v", s.lastUsers)
+	}
+}
+
+func TestRESTEmptyUsersKeepsKernelUntilConfirmed(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	s.lastConfig = &model.NodeSpec{Protocol: "vless"}
+	s.updateUserState([]model.UserSpec{{ID: 1, UUID: "u1"}})
+
+	empty := controlplane.Snapshot{Users: []model.UserSpec{}, UsersChanged: true, PolledAt: time.Now()}
+	for i := 0; i < 2; i++ {
+		s.applyRESTUsers(context.Background(), empty)
+		if !k.IsRunning() {
+			t.Fatalf("kernel stopped after %d empty polls, want confirmation first", i+1)
+		}
+	}
+	s.applyRESTUsers(context.Background(), empty)
+	if k.IsRunning() {
+		t.Fatal("expected kernel stop after three confirmed empty polls")
+	}
+	if len(s.lastUsers) != 0 {
+		t.Fatalf("expected empty user state, got %#v", s.lastUsers)
+	}
+}
+
+func TestRESTEmptyUsersStopsImmediatelyInMaintenance(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	s.lastConfig = &model.NodeSpec{Protocol: "vless"}
+	s.updateUserState([]model.UserSpec{{ID: 1, UUID: "u1"}})
+	s.lastMaintenance = true
+
+	s.applyRESTUsers(context.Background(), controlplane.Snapshot{
+		Users:        []model.UserSpec{},
+		UsersChanged: true,
+		Maintenance:  true,
+		PolledAt:     time.Now(),
+	})
+	if k.IsRunning() {
+		t.Fatal("expected maintenance mode to stop the kernel")
+	}
+}
+
+func TestRESTConfigNeedsTwoMatchingPolls(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	s.cfg = &config.Config{}
+	oldCfg := &model.NodeSpec{Protocol: "vless", ServerPort: 1000}
+	s.lastConfig = oldCfg
+	s.lastConfigHash = computeConfigHash(oldCfg)
+	s.updateUserState([]model.UserSpec{{ID: 1, UUID: "u1"}})
+
+	newCfg := &model.NodeSpec{Protocol: "vless", ServerPort: 2000}
+	snap := controlplane.Snapshot{Config: newCfg, ConfigChanged: true, PolledAt: time.Now()}
+	s.applyRESTConfig(context.Background(), snap)
+	if s.lastConfig.ServerPort != 1000 {
+		t.Fatalf("config applied before confirmation: port=%d", s.lastConfig.ServerPort)
+	}
+
+	s.applyRESTConfig(context.Background(), snap)
+	if s.lastConfig.ServerPort != 2000 {
+		t.Fatalf("config not applied after confirmation: port=%d", s.lastConfig.ServerPort)
+	}
+}
+
+func TestConfigHashIgnoresNonKernelPanelFields(t *testing.T) {
+	base := &panel.NodeConfig{Protocol: "vless", ServerPort: 443, Network: "tcp"}
+	specA := model.NodeSpecFromPanel(base)
+	hashA := computeConfigHash(specA)
+
+	withRuntimeFields := &panel.NodeConfig{
+		Protocol:        "vless",
+		ServerPort:      443,
+		Network:         "tcp",
+		MaintenanceMode: true,
+		BaseConfig:      panel.BaseConfig{PushInterval: 30, PullInterval: 10},
+	}
+	specB := model.NodeSpecFromPanel(withRuntimeFields)
+	hashB := computeConfigHash(specB)
+
+	if hashA != hashB {
+		t.Fatalf("maintenance/base_config must not affect kernel config hash: %s != %s", hashA, hashB)
+	}
+}
+
+func TestConfigHashTreatsNilAndEmptySlicesTheSame(t *testing.T) {
+	a := &model.NodeSpec{Protocol: "vless", ServerPort: 443, Routes: nil, CustomOutbounds: nil, CustomRouteRules: nil}
+	b := &model.NodeSpec{Protocol: "vless", ServerPort: 443, Routes: []model.RouteRule{}, CustomOutbounds: []model.OutboundConfig{}, CustomRouteRules: []model.CustomRouteRule{}}
+	if hashA, hashB := computeConfigHash(a), computeConfigHash(b); hashA != hashB {
+		t.Fatalf("nil and empty slices must hash identically: %s != %s", hashA, hashB)
 	}
 }

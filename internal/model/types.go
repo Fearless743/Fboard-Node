@@ -85,6 +85,62 @@ type NodeSpec struct {
 	AcceptProxyProtocol bool
 }
 
+// CanonicalizeForHash returns a shallow copy of spec with empty slices/maps
+// normalised to nil. Different transports (REST direct vs WS through the
+// mailbox) may produce nil vs empty but semantically identical values; hashing
+// must not treat that as a configuration change and restart the kernel.
+func CanonicalizeForHash(spec *NodeSpec) *NodeSpec {
+	if spec == nil {
+		return nil
+	}
+	c := *spec
+	if len(c.NetworkSettings) == 0 {
+		c.NetworkSettings = nil
+	}
+	if len(c.TLSSettings) == 0 {
+		c.TLSSettings = nil
+	}
+	if len(c.Routes) == 0 {
+		c.Routes = nil
+	}
+	if len(c.CustomOutbounds) == 0 {
+		c.CustomOutbounds = nil
+	}
+	if len(c.CustomRoutes) == 0 {
+		c.CustomRoutes = nil
+	}
+	if len(c.CustomRouteRules) == 0 {
+		c.CustomRouteRules = nil
+	}
+	if len(c.ALPN) == 0 {
+		c.ALPN = nil
+	}
+	if len(c.TrustTunnelDNSUpstreams) == 0 {
+		c.TrustTunnelDNSUpstreams = nil
+	}
+	if len(c.MasqueAddresses) == 0 {
+		c.MasqueAddresses = nil
+	}
+	if len(c.MasqueAdvertiseRoutes) == 0 {
+		c.MasqueAdvertiseRoutes = nil
+	}
+	if c.SudokuConfig != nil {
+		sc := *c.SudokuConfig
+		if len(sc.CustomTables) == 0 {
+			sc.CustomTables = nil
+		}
+		c.SudokuConfig = &sc
+	}
+	if c.CertConfig != nil {
+		cc := *c.CertConfig
+		if len(cc.DNSEnv) == 0 {
+			cc.DNSEnv = nil
+		}
+		c.CertConfig = &cc
+	}
+	return &c
+}
+
 type OutboundConfig struct {
 	Tag      string
 	Protocol string

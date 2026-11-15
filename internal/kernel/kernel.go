@@ -115,7 +115,7 @@ type TrafficDataReleaser interface {
 // require a kernel restart/reconstruction if changed.
 func ComputeHash(nc *model.NodeSpec, users []model.UserSpec) string {
 	h := sha256.New()
-	configData, _ := json.Marshal(nc)
+	configData, _ := json.Marshal(model.CanonicalizeForHash(nc))
 	h.Write(configData)
 	sorted := make([]model.UserSpec, len(users))
 	copy(sorted, users)

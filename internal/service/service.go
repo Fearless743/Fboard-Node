@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +39,11 @@ import (
 // gives a daemon five seconds by default), so the report is abandoned when
 // it does not finish in time.
 const finalReportTimeout = 1500 * time.Millisecond
+
+type pollResult struct {
+	snapshot controlplane.Snapshot
+	err      error
+}
 
 type Service struct {
 	cfg          *config.Config
@@ -72,12 +79,33 @@ type Service struct {
 	portClaim *portClaim
 
 	pushInterval int // seconds
+	pullInterval int // seconds
 
 	lastUserHash   string // hash of user list for change detection
 	lastConfigHash string // hash of full config for change detection
 
 	// pushActive prevents overlapping push goroutines.
 	pushActive atomic.Bool
+
+	// pollActive prevents overlapping REST poll goroutines.
+	pollActive atomic.Bool
+	pollCh     chan pollResult
+
+	// REST reconciliation guardrails. All fields below are only touched from
+	// the main Run loop (plus the poll goroutine writes pollCh), so no lock is
+	// needed. They ensure a transient panel response cannot rewrite live state.
+	pendingConfigHash  string
+	pendingConfigCount int
+	pendingRemovals    map[int]int
+	pendingEmptyUsers  int
+	lastMaintenance    bool
+	lastWSConfigAt     atomic.Int64
+	lastWSUserAt       atomic.Int64
+
+	// pendingReportID is reused across retries so the panel can dedupe a
+	// report whose response was lost (prevents double traffic accounting).
+	reportMu        sync.Mutex
+	pendingReportID string
 
 	wsClient         controlplane.PushClient        // Push client (nil if push is not enabled)
 	wsEvents         chan controlplane.Event        // receives data events from push transport
@@ -173,16 +201,18 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	st := limiter.NewSpeedTracker(l)
 
 	svc := &Service{
-		cfg:          cfg,
-		source:       cp,
-		sink:         cp,
-		kernel:       k,
-		tracker:      tracker.New(),
-		limiter:      l,
-		speedTracker: st,
-		cert:         certMgr,
-		wsEvents:     make(chan controlplane.Event, 16),
-		wsStatusCh:   make(chan controlplane.StatusChange, 4),
+		cfg:             cfg,
+		source:          cp,
+		sink:            cp,
+		kernel:          k,
+		tracker:         tracker.New(),
+		limiter:         l,
+		speedTracker:    st,
+		cert:            certMgr,
+		wsEvents:        make(chan controlplane.Event, 16),
+		wsStatusCh:      make(chan controlplane.StatusChange, 4),
+		pollCh:          make(chan pollResult, 1),
+		pendingRemovals: make(map[int]int),
 	}
 	// Default: kernel should run whenever config + users allow it.
 	svc.kernelDesired.Store(true)
@@ -236,19 +266,34 @@ func (s *Service) Run(ctx context.Context) error {
 	defer reportTicker.Stop()
 	defer deviceReportTicker.Stop()
 
+	var pullTicker *time.Ticker
+	var pullCh <-chan time.Time
+	if s.source.SupportsPolling() {
+		pullInterval := time.Duration(math.Max(float64(s.pullInterval), 5)) * time.Second
+		pullTicker = time.NewTicker(pullInterval)
+		pullCh = pullTicker.C
+		defer pullTicker.Stop()
+	}
+
 	s.startWSClient(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
-			s.pushReportSync()
+			s.pushReportSync(ctx)
 			return nil
 
 		case <-trackTicker.C:
 			s.trackAndEnforce(ctx)
 
 		case <-reportTicker.C:
-			s.pushReportAsync()
+			s.pushReportAsync(ctx)
+
+		case <-pullCh:
+			s.startPoll(ctx)
+
+		case result := <-s.pollCh:
+			s.applyPoll(ctx, result)
 
 		case <-deviceReportTicker.C:
 			s.reportDevices()
@@ -262,6 +307,215 @@ func (s *Service) Run(ctx context.Context) error {
 		case event := <-s.wsEvents:
 			s.handleWSEvent(ctx, event)
 		}
+	}
+}
+
+func (s *Service) startPoll(ctx context.Context) {
+	if !s.source.SupportsPolling() {
+		return
+	}
+	if !s.pollActive.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer s.pollActive.Store(false)
+		pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		snap, err := s.source.Poll(pollCtx)
+		select {
+		case s.pollCh <- pollResult{snapshot: snap, err: err}:
+		default:
+			// Main loop is busy; drop this result and try again next tick.
+		}
+	}()
+}
+
+// applyPoll applies a REST snapshot through the stability guardrails:
+//   - a WS event that landed after the poll started wins;
+//   - while WS is connected, REST only asks the panel for a full-sync push;
+//   - while WS is down, config changes need two matching polls;
+//   - user removals need two confirmations; an empty list needs maintenance
+//     or three confirmations.
+//
+// Nothing in this path may stop a healthy kernel on a single bad response.
+func (s *Service) applyPoll(ctx context.Context, result pollResult) {
+	if result.err != nil {
+		s.log().Warn("panel poll failed; keeping current state", "error", result.err)
+	}
+	snap := result.snapshot
+	if !snap.ConfigChanged && !snap.UsersChanged {
+		return
+	}
+
+	if snap.ConfigChanged {
+		s.applyRESTConfig(ctx, snap)
+	}
+	if snap.UsersChanged {
+		s.applyRESTUsers(ctx, snap)
+	}
+}
+
+func (s *Service) applyRESTConfig(ctx context.Context, snap controlplane.Snapshot) {
+	if snap.Config == nil {
+		return
+	}
+	if polledAt := snap.PolledAt.UnixNano(); polledAt > 0 && polledAt <= s.lastWSConfigAt.Load() {
+		s.log().Debug("ignoring REST config older than a newer WS push")
+		return
+	}
+	// Config carries maintenance mode. Update it even when the kernel-relevant
+	// hash is unchanged, otherwise an empty user list during maintenance would
+	// be treated as a suspicious transient response.
+	s.lastMaintenance = snap.Maintenance
+	hash := computeConfigHash(snap.Config)
+	if hash == s.lastConfigHash {
+		s.pendingConfigHash = ""
+		s.pendingConfigCount = 0
+		return
+	}
+
+	if s.wsConnected() {
+		// Keep WS as the mutation path while it is healthy: ask the panel for
+		// an explicit full-sync instead of applying a possibly stale snapshot.
+		s.log().Info("REST config differs from current state; requesting WS full-sync")
+		s.requestFullSync()
+		return
+	}
+
+	if hash != s.pendingConfigHash {
+		s.pendingConfigHash = hash
+		s.pendingConfigCount = 1
+		s.log().Info("REST config change pending confirmation", "polls", 1)
+		return
+	}
+	s.pendingConfigCount++
+	if s.pendingConfigCount < 2 {
+		s.log().Info("REST config change pending confirmation", "polls", s.pendingConfigCount)
+		return
+	}
+
+	s.pendingConfigHash = ""
+	s.pendingConfigCount = 0
+	s.log().Info("applying REST config after confirmation")
+	s.handleWSEvent(ctx, controlplane.Event{
+		Type:        controlplane.EventSyncConfig,
+		Source:      "rest",
+		Config:      snap.Config,
+		Maintenance: snap.Maintenance,
+	})
+}
+
+func (s *Service) applyRESTUsers(ctx context.Context, snap controlplane.Snapshot) {
+	if snap.Users == nil {
+		return
+	}
+	if polledAt := snap.PolledAt.UnixNano(); polledAt > 0 && polledAt <= s.lastWSUserAt.Load() {
+		s.log().Debug("ignoring REST users older than a newer WS push")
+		return
+	}
+	if computeUserHash(snap.Users) == s.lastUserHash {
+		s.pendingEmptyUsers = 0
+		return
+	}
+	if len(snap.Users) > 0 {
+		s.pendingEmptyUsers = 0
+	}
+
+	if s.wsConnected() {
+		s.log().Info("REST users differ from current state; requesting WS full-sync")
+		s.requestFullSync()
+		return
+	}
+
+	if len(snap.Users) == 0 {
+		if len(s.lastUsers) == 0 {
+			s.pendingEmptyUsers = 0
+			return
+		}
+		if s.lastMaintenance || snap.Maintenance {
+			s.pendingEmptyUsers = 0
+			s.stopKernelForNoUsers(ctx, "maintenance mode")
+			return
+		}
+		s.pendingEmptyUsers++
+		if s.pendingEmptyUsers < 3 {
+			s.log().Warn("REST returned an empty user list; keeping current users",
+				"polls", s.pendingEmptyUsers, "maintenance", snap.Maintenance)
+			return
+		}
+		s.pendingEmptyUsers = 0
+		s.stopKernelForNoUsers(ctx, "empty user list confirmed by 3 REST polls")
+		return
+	}
+	s.pendingEmptyUsers = 0
+
+	effective := s.applyPendingRemovals(snap.Users)
+	hash := computeUserHash(effective)
+	if hash == s.lastUserHash {
+		return
+	}
+	if hk, ok := s.kernel.(interface{ SupportsHitlessUsers() bool }); ok && !hk.SupportsHitlessUsers() {
+		s.log().Warn("applying REST user changes on a protocol without hitless user updates; kernel may restart once")
+	}
+	s.log().Info("applying REST users after confirmation",
+		"effective", len(effective), "snapshot", len(snap.Users))
+	s.applyUserUpdate(ctx, effective, hash)
+}
+
+// applyPendingRemovals keeps users that disappeared from a single REST
+// snapshot until the removal is confirmed by a second consecutive poll.
+func (s *Service) applyPendingRemovals(snapshotUsers []model.UserSpec) []model.UserSpec {
+	if s.pendingRemovals == nil {
+		s.pendingRemovals = make(map[int]int)
+	}
+	present := make(map[int]struct{}, len(snapshotUsers))
+	for _, u := range snapshotUsers {
+		present[u.ID] = struct{}{}
+	}
+
+	effective := append([]model.UserSpec(nil), snapshotUsers...)
+	for _, old := range s.lastUsers {
+		if _, ok := present[old.ID]; ok {
+			delete(s.pendingRemovals, old.ID)
+			continue
+		}
+		s.pendingRemovals[old.ID]++
+		if s.pendingRemovals[old.ID] < 2 {
+			effective = append(effective, old)
+			s.log().Warn("REST user missing; deferring removal until confirmed",
+				"user_id", old.ID, "polls", s.pendingRemovals[old.ID])
+			continue
+		}
+		delete(s.pendingRemovals, old.ID)
+		s.log().Info("REST user removal confirmed", "user_id", old.ID)
+	}
+	return effective
+}
+
+// stopKernelForNoUsers is the only path that stops a healthy kernel because
+// the panel has no users for this node. It is deliberately explicit and
+// logged; a transient empty response is filtered out before this point.
+func (s *Service) stopKernelForNoUsers(ctx context.Context, reason string) {
+	_ = ctx
+	if !s.kernel.IsRunning() {
+		s.prepareUserState(nil)
+		return
+	}
+	s.log().Warn("no users available; stopping kernel", "reason", reason)
+	s.kernel.Stop()
+	s.releaseNodePort()
+	s.appliedState.Config = nil
+	s.appliedState.Users = nil
+	s.prepareUserState(nil)
+}
+
+func (s *Service) wsConnected() bool {
+	return s.wsClient != nil && s.wsClient.IsConnected()
+}
+
+func (s *Service) requestFullSync() {
+	if s.wsClient != nil {
+		s.wsClient.RequestFullSync()
 	}
 }
 
@@ -283,6 +537,15 @@ func (s *Service) initialSetup(ctx context.Context) error {
 	if s.pushInterval == 0 {
 		s.pushInterval = 60
 	}
+	if s.cfg.Node.PullInterval == 0 && bootstrap.PullInterval > 0 {
+		s.pullInterval = bootstrap.PullInterval
+	} else {
+		s.pullInterval = s.cfg.Node.PullInterval
+	}
+	if s.pullInterval == 0 {
+		s.pullInterval = 60
+	}
+	s.lastMaintenance = bootstrap.Maintenance
 
 	if bootstrap.Push != nil {
 		s.wsClient = bootstrap.Push
@@ -308,6 +571,7 @@ func (s *Service) initialSetup(ctx context.Context) error {
 	s.lastConfig = bootstrap.Config
 	s.metricsMu.Unlock()
 	s.lastConfigHash = computeConfigHash(bootstrap.Config)
+	s.log().Debug("initial config hash", "hash", shortHash(s.lastConfigHash))
 	s.updateUserState(bootstrap.Users)
 
 	s.log().Info("initial snapshot ready",
@@ -491,24 +755,36 @@ func (s *Service) handleWSStatus(ctx context.Context, status controlplane.Status
 
 // handleWSEvent processes data events received via WebSocket
 func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
+	source := event.Source
+	if source == "" {
+		source = "ws"
+	}
 	switch event.Type {
 	case controlplane.EventSyncConfig:
 		if event.Config == nil {
 			return
 		}
+		if source == "ws" {
+			s.lastWSConfigAt.Store(time.Now().UnixNano())
+		}
+		// Maintenance is intentionally not part of NodeSpec/hash; still keep
+		// the flag current even when the kernel config itself is unchanged.
+		s.lastMaintenance = event.Maintenance
 		newConfigHash := computeConfigHash(event.Config)
+		s.log().Debug("config event hash", "source", source,
+			"hash", shortHash(newConfigHash), "current", shortHash(s.lastConfigHash))
 		if newConfigHash == s.lastConfigHash {
 			return
 		}
 		if err := validateNodeRuntime(s.kernel.Protocols(), event.Config, s.cert.TLSCert()); err != nil {
-			s.log().Warn("ws config validation failed, ignoring update", "error", err)
+			s.log().Warn("config validation failed, ignoring update", "source", source, "error", err)
 			return
 		}
 		// Initialize nodeLog on first config
 		if s.nodeLog == nil {
 			s.nodeLog = nlog.ForNodeOn(s.machineID(), event.Config.Protocol, event.Config.ServerPort)
 		}
-		s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(event.Users)))
+		s.nodeLog.Info(fmt.Sprintf("config updated via %s", source))
 		s.metricsMu.Lock()
 		s.lastConfig = event.Config
 		s.metricsMu.Unlock()
@@ -517,7 +793,17 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		s.applyChanges(ctx, true, false)
 
 	case controlplane.EventSyncUsers:
+		if source == "ws" {
+			s.lastWSUserAt.Store(time.Now().UnixNano())
+		}
 		if event.Users == nil {
+			return
+		}
+		if len(event.Users) == 0 {
+			// Explicit empty full-sync: maintenance mode or an empty group.
+			// Stop through one logged path instead of UpdateUsers([]), which
+			// would implicitly stop the kernel inside the xray adapter.
+			s.stopKernelForNoUsers(ctx, "empty user list from "+source+" full-sync")
 			return
 		}
 		newHash := computeUserHash(event.Users)
@@ -525,7 +811,7 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 			return
 		}
 		if s.nodeLog != nil {
-			s.nodeLog.Info(fmt.Sprintf("users updated, %d users", len(event.Users)))
+			s.nodeLog.Info(fmt.Sprintf("users updated via %s, %d users", source, len(event.Users)))
 		}
 		s.applyUserUpdate(ctx, event.Users, newHash)
 
@@ -869,6 +1155,13 @@ func (s *Service) KernelState() (running, desired bool) {
 // Called from WS sync.users and REST polling.
 // When kernelDesired is false, only user state is updated (kernel stays stopped).
 func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, newHash string) {
+	if len(users) == 0 {
+		s.stopKernelForNoUsers(ctx, "applyUserUpdate empty user list")
+		if newHash != "" {
+			s.lastUserHash = newHash
+		}
+		return
+	}
 	if !s.kernelDesired.Load() {
 		s.prepareUserState(users)
 		if newHash != "" {
@@ -876,9 +1169,16 @@ func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, n
 		}
 		return
 	}
-	if !s.ensureRunning() {
-		// Still record users so a later remote start uses the latest set.
-		s.prepareUserState(users)
+	if !s.kernel.IsRunning() {
+		// The kernel may have been stopped because the previous user set was
+		// empty. Record the new users and (re)start with the last config.
+		prevUsers, prevHash := s.prepareUserState(users)
+		if s.lastConfig != nil {
+			if !s.startKernel(s.lastConfig, users) {
+				s.restoreUserState(prevUsers, prevHash)
+				return
+			}
+		}
 		if newHash != "" {
 			s.lastUserHash = newHash
 		}
@@ -914,8 +1214,17 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		}
 		merged := mergeUsers(s.lastUsers, deltaUsers)
 
-		if !s.kernelDesired.Load() || !s.ensureRunning() {
+		if !s.kernelDesired.Load() {
 			s.prepareUserState(merged)
+			return
+		}
+		if !s.kernel.IsRunning() {
+			prevUsers, prevHash := s.prepareUserState(merged)
+			if s.lastConfig != nil {
+				if !s.startKernel(s.lastConfig, merged) {
+					s.restoreUserState(prevUsers, prevHash)
+				}
+			}
 			return
 		}
 
@@ -950,6 +1259,12 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 			return
 		}
 		filtered := subtractUsers(s.lastUsers, deltaUsers)
+		if len(filtered) == 0 {
+			// Last user removed: use the explicit stop path instead of
+			// RemoveUsers, which would stop the kernel as a side effect.
+			s.stopKernelForNoUsers(ctx, "last user removed by ws delta")
+			return
+		}
 
 		if !s.kernelDesired.Load() || !s.kernel.IsRunning() {
 			s.prepareUserState(filtered)
@@ -1096,7 +1411,7 @@ func (s *Service) trackAndEnforce(ctx context.Context) {
 // pushReportAsync sends the report via WS node.status. Only one push runs at a time.
 // WS sends are non-blocking (buffered channel); on disconnect the flushed
 // tracker data is restored for the next tick.
-func (s *Service) pushReportAsync() {
+func (s *Service) pushReportAsync(ctx context.Context) {
 	if !s.sink.SupportsReporting() {
 		return
 	}
@@ -1111,6 +1426,7 @@ func (s *Service) pushReportAsync() {
 	status := monitor.Collect()
 	metrics := s.buildMetrics(status)
 	metrics["kernel_status"] = s.kernel.IsRunning()
+	reportID := s.currentReportID()
 
 	go func() {
 		defer s.pushActive.Store(false)
@@ -1122,8 +1438,10 @@ func (s *Service) pushReportAsync() {
 				)
 			}
 		}()
-		if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
-			s.log().Debug("report skipped (ws not connected)")
+		reportCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := s.sink.Report(reportCtx, controlplane.ReportPayload{ReportID: reportID, Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
+			s.log().Debug("report failed; will retry with the same report id", "error", err)
 			if len(traffic) > 0 {
 				s.tracker.RestoreTraffic(traffic)
 			}
@@ -1132,6 +1450,7 @@ func (s *Service) pushReportAsync() {
 			}
 			return
 		}
+		s.finishReportID(reportID)
 		nlog.ReportPushed(len(traffic), len(online))
 	}()
 }
@@ -1141,7 +1460,7 @@ func (s *Service) pushReportAsync() {
 // The report is best-effort over WS (non-blocking channel send) and is
 // abandoned when it does not finish in time so shutdown stays within the
 // service manager's stop window.
-func (s *Service) pushReportSync() {
+func (s *Service) pushReportSync(ctx context.Context) {
 	if !s.sink.SupportsReporting() {
 		return
 	}
@@ -1151,6 +1470,10 @@ func (s *Service) pushReportSync() {
 	status := monitor.Collect()
 	metrics := s.buildMetrics(status)
 	metrics["kernel_status"] = s.kernel.IsRunning()
+
+	reportID := s.currentReportID()
+	syncCtx, cancel := context.WithTimeout(ctx, finalReportTimeout)
+	defer cancel()
 
 	done := make(chan error, 1)
 	go func() {
@@ -1163,17 +1486,46 @@ func (s *Service) pushReportSync() {
 				done <- fmt.Errorf("final report panicked: %v", r)
 			}
 		}()
-		done <- s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics})
+		done <- s.sink.Report(syncCtx, controlplane.ReportPayload{ReportID: reportID, Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics})
 	}()
 
 	select {
 	case err := <-done:
 		if err != nil {
 			s.log().Warn("failed to push final report", "error", err)
+		} else {
+			s.finishReportID(reportID)
 		}
 	case <-time.After(finalReportTimeout):
 		s.log().Warn("final report timed out, continuing shutdown", "timeout", finalReportTimeout)
 	}
+}
+
+// currentReportID returns the idempotency key for the next report. It is only
+// replaced after a report is acknowledged, so retries reuse the same ID.
+func (s *Service) currentReportID() string {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	if s.pendingReportID == "" {
+		s.pendingReportID = newReportID()
+	}
+	return s.pendingReportID
+}
+
+func (s *Service) finishReportID(id string) {
+	s.reportMu.Lock()
+	if s.pendingReportID == id {
+		s.pendingReportID = ""
+	}
+	s.reportMu.Unlock()
+}
+
+func newReportID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // buildMetrics aggregates node-level metrics to be reported to the panel.
@@ -1252,6 +1604,13 @@ func (s *Service) buildMetrics(status monitor.Status) map[string]interface{} {
 // computeConfigHash returns a deterministic hash of the node config.
 // It uses JSON marshaling to ensure all fields are captured, ensuring that
 // any configuration change correctly triggers a kernel reload.
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
 func computeConfigHash(cfg *model.NodeSpec) string {
 	if cfg == nil {
 		return ""
@@ -1259,7 +1618,7 @@ func computeConfigHash(cfg *model.NodeSpec) string {
 	h := sha256.New()
 	// We marshal the entire config to be safe. Node config updates are low-frequency,
 	// so the robustness of capturing all fields outweighs the micro-performance of manual hashing.
-	data, _ := json.Marshal(cfg)
+	data, _ := json.Marshal(model.CanonicalizeForHash(cfg))
 	h.Write(data)
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
