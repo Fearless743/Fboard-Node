@@ -805,6 +805,11 @@ type REALITYConfig struct {
 	ShortId       string `json:"shortId"`
 	Mldsa65Verify string `json:"mldsa65Verify"`
 	SpiderX       string `json:"spiderX"`
+
+	// ECHServerKeys is a base64-encoded ECHKeySetList. When set on a REALITY
+	// server, ECH ClientHellos are decrypted and the inner hello is used for
+	// authentication. Same format as TLS's "echServerKeys".
+	ECHServerKeys string `json:"echServerKeys"`
 }
 
 func (c *REALITYConfig) Build() (proto.Message, error) {
@@ -902,6 +907,14 @@ func (c *REALITYConfig) Build() (proto.Message, error) {
 		config.Xver = c.Xver
 		config.ServerNames = c.ServerNames
 		config.MaxTimeDiff = c.MaxTimeDiff
+
+		if c.ECHServerKeys != "" {
+			echKeys, err := base64.StdEncoding.DecodeString(c.ECHServerKeys)
+			if err != nil {
+				return nil, errors.New(`invalid "echServerKeys": `, c.ECHServerKeys)
+			}
+			config.EchServerKeys = echKeys
+		}
 
 		if c.Mldsa65Seed != "" {
 			if c.Mldsa65Seed == c.PrivateKey {
