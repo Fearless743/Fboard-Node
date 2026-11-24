@@ -15,27 +15,27 @@ LDFLAGS := -s -w \
 
 # Build for current platform
 build:
-	go build -ldflags "$(LDFLAGS)" -tags "with_quic with_utls with_wireguard with_clash_api" -o fboard-node ./cmd/fboard-node
+	go build -ldflags "$(LDFLAGS)" -o fboard-node ./cmd/fboard-node
 	go build -ldflags "$(LDFLAGS)" -o fbctl ./cmd/fbctl
 
 # Build for Linux amd64
 build-linux:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -tags "with_quic with_utls with_wireguard with_acme with_clash_api" -o fboard-node-linux-amd64 ./cmd/fboard-node
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o fboard-node-linux-amd64 ./cmd/fboard-node
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o fbctl-linux-amd64 ./cmd/fbctl
 
 # Build for Linux arm64
 build-linux-arm64:
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -tags "with_quic with_utls with_wireguard with_acme with_clash_api" -o fboard-node-linux-arm64 ./cmd/fboard-node
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o fboard-node-linux-arm64 ./cmd/fboard-node
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o fbctl-linux-arm64 ./cmd/fbctl
 
 # Build for FreeBSD amd64
 build-freebsd:
-	CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -tags "with_quic with_utls with_wireguard with_acme with_clash_api" -o fboard-node-freebsd-amd64 ./cmd/fboard-node
+	CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o fboard-node-freebsd-amd64 ./cmd/fboard-node
 	CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o fbctl-freebsd-amd64 ./cmd/fbctl
 
 # Build for FreeBSD arm64
 build-freebsd-arm64:
-	CGO_ENABLED=0 GOOS=freebsd GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -tags "with_quic with_utls with_wireguard with_acme with_clash_api" -o fboard-node-freebsd-arm64 ./cmd/fboard-node
+	CGO_ENABLED=0 GOOS=freebsd GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o fboard-node-freebsd-arm64 ./cmd/fboard-node
 	CGO_ENABLED=0 GOOS=freebsd GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o fbctl-freebsd-arm64 ./cmd/fbctl
 
 # Pack release archives: each archive contains fboard-node + fbctl

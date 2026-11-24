@@ -11,13 +11,15 @@ Guidance for AI coding agents working in this repository.
 - `internal/controlplane/` — machine control plane + mailbox
 - `internal/panel/` — panel REST client + WebSocket client (REST baseline; WS realtime/control)
 - `internal/kernel/` — kernel interface + `xray/` adapter (only kernel)
+- `internal/xraycore/` — vendored xray-core source (subset, MPL-2.0); kernel fixes go here
 - `internal/config/` — YAML config (machine-only panel connection)
 - `internal/model/` — node/user specs and validation
 - `internal/cert/`, `limiter/`, `tracker/`, `monitor/`, `nlog/`
 
 ## Kernel
 
-Only **xray-core** is embedded (via `go.mod` replace to Fearless743/Xray-core).
+Only **xray-core** is embedded, as vendored source in `internal/xraycore/` (no `go.mod` dependency).
+Kernel changes go there directly; `internal/kernel/xray/` is the node-specific adapter.
 There is no kernel type selector, factory, or multi-kernel support matrix.
 
 ## Deployment

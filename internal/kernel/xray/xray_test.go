@@ -8,10 +8,10 @@ import (
 
 	"github.com/fearless743/fboard-node/internal/config"
 	"github.com/fearless743/fboard-node/internal/model"
-	appstats "github.com/xtls/xray-core/app/stats"
-	xrayCore "github.com/xtls/xray-core/core"
-	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
-	xraystats "github.com/xtls/xray-core/features/stats"
+	appstats "github.com/fearless743/fboard-node/internal/xraycore/app/stats"
+	xrayCore "github.com/fearless743/fboard-node/internal/xraycore/core"
+	featurebandwidth "github.com/fearless743/fboard-node/internal/xraycore/features/bandwidth"
+	xraystats "github.com/fearless743/fboard-node/internal/xraycore/features/stats"
 	"golang.org/x/time/rate"
 )
 

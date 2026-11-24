@@ -7,25 +7,17 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
-	_ "unsafe"
 
-	xrayDispatcher "github.com/xtls/xray-core/app/dispatcher"
-	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/buf"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/session"
-	"github.com/xtls/xray-core/features/routing"
-	"github.com/xtls/xray-core/transport"
+	xrayDispatcher "github.com/fearless743/fboard-node/internal/xraycore/app/dispatcher"
+	"github.com/fearless743/fboard-node/internal/xraycore/common"
+	"github.com/fearless743/fboard-node/internal/xraycore/common/buf"
+	"github.com/fearless743/fboard-node/internal/xraycore/common/net"
+	"github.com/fearless743/fboard-node/internal/xraycore/common/session"
+	"github.com/fearless743/fboard-node/internal/xraycore/features/routing"
+	"github.com/fearless743/fboard-node/internal/xraycore/transport"
 
 	"github.com/fearless743/fboard-node/internal/nlog"
 )
-
-// Access xray's internal config creator registry so we can replace the
-// default dispatcher factory with ours. This runs AFTER xray's init()
-// functions because our package imports xray (dependency order guarantee).
-//
-//go:linkname typeCreatorRegistry github.com/xtls/xray-core/common.typeCreatorRegistry
-var typeCreatorRegistry map[reflect.Type]common.ConfigCreator
 
 var origDispatcherFactory common.ConfigCreator
 
@@ -35,8 +27,7 @@ var globalLimitDispatcher atomic.Pointer[LimitDispatcher]
 
 func init() {
 	configType := reflect.TypeOf((*xrayDispatcher.Config)(nil))
-	origDispatcherFactory = typeCreatorRegistry[configType]
-	typeCreatorRegistry[configType] = limitDispatcherFactory
+	origDispatcherFactory = common.ReplaceConfigCreator(configType, limitDispatcherFactory)
 }
 
 func limitDispatcherFactory(ctx context.Context, config interface{}) (interface{}, error) {

@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/fearless743/fboard-node/internal/model"
-	"github.com/xtls/xray-core/common/buf"
-	"github.com/xtls/xray-core/transport"
+	"github.com/fearless743/fboard-node/internal/xraycore/common/buf"
+	"github.com/fearless743/fboard-node/internal/xraycore/transport"
 )
 
 func newTestDispatcher() *LimitDispatcher {

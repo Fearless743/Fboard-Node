@@ -11,7 +11,7 @@ Node backend for [Fboard](https://github.com/Fearless743/Fboard). Based on [Xboa
 > - 移除 sing-box / mihomo 双内核，仅保留 xray-core 单内核
 > - 在内核 xray-core 中添加 TUIC、AnyTLS、Naive、Mieru 协议支持
 > - 内核配置清理（移除内核选择逻辑）
-> - 全面重命名为 fboard-node 并指向 [Fearless743/Xray-core](https://github.com/Fearless743/Xray-core)
+> - 全面重命名为 fboard-node，并将 [Fearless743/Xray-core](https://github.com/Fearless743/Xray-core) 按需内置到 `internal/xraycore/`
 >
 > 感谢 cedar2025 的原始工作。
 

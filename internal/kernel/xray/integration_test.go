@@ -10,7 +10,7 @@ import (
 	"github.com/fearless743/fboard-node/internal/config"
 	"github.com/fearless743/fboard-node/internal/kernel"
 	"github.com/fearless743/fboard-node/internal/model"
-	"github.com/xtls/xray-core/features/routing"
+	"github.com/fearless743/fboard-node/internal/xraycore/features/routing"
 )
 
 func freePort(t *testing.T) int {
