@@ -458,7 +458,7 @@ func (o *Orchestrator) applyNodes(nodes []panel.MachineNode, source string) {
 // ─── Machine status reporting (WS) ───────────────────────────────────────
 
 func (o *Orchestrator) reportMachineStatus() {
-	s := monitor.Collect()
+	s := monitor.Cached()
 	kernel := o.aggregateKernelStatus()
 	payload := map[string]interface{}{
 		"cpu":  s.CPU,

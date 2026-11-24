@@ -393,6 +393,15 @@ func (w *WSClient) connect(ctx context.Context) error {
 
 	conn.SetReadLimit(10 << 20) // 10MB max message size
 
+	// Both panel implementations push an application-level "ping" every 55s.
+	// Use 3x that as a read deadline: a half-open or black-holed connection is
+	// then detected in minutes instead of being left to TCP keepalive, while a
+	// server that misses one or two pings is not disconnected prematurely.
+	const readTimeout = 3 * 55 * time.Second
+	if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+		return fmt.Errorf("set read deadline: %w", err)
+	}
+
 	// Read first message — expect auth.success or error
 	var firstMsg wsMessage
 	if err := conn.ReadJSON(&firstMsg); err != nil {
@@ -427,6 +436,13 @@ func (w *WSClient) connect(ctx context.Context) error {
 	reportTicker := time.NewTicker(w.cfg.StatusInterval)
 	defer reportTicker.Stop()
 
+	// Client-side control pings keep NAT/firewall mappings alive and elicit
+	// pongs even when the panel has no data to push. Liveness does not depend
+	// on the pong: the read deadline above is refreshed on every inbound
+	// message, so panels that only send their 55s app-level ping stay compatible.
+	pingTicker := time.NewTicker(30 * time.Second)
+	defer pingTicker.Stop()
+
 	// writeCh decouples data collection from network I/O.
 	writeCh := make(chan wsMessage, 16)
 	w.writeCh = writeCh
@@ -459,6 +475,8 @@ func (w *WSClient) connect(ctx context.Context) error {
 				}
 				return
 			}
+			// Any inbound traffic proves the connection is alive.
+			_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 			nlog.Core().Debug("ws recv", "event", msg.Event, "data", string(msg.Data))
 			if !w.dispatch(msg) {
 				// Handler panicked: drop this connection so state is rebuilt
@@ -490,6 +508,11 @@ func (w *WSClient) connect(ctx context.Context) error {
 
 		case err := <-errCh:
 			return fmt.Errorf("read: %w", err)
+
+		case <-pingTicker.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
+				return fmt.Errorf("ping: %w", err)
+			}
 
 		case <-reportTicker.C:
 			// Send periodic node.status via WebSocket

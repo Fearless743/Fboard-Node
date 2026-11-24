@@ -4,6 +4,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fearless743/fboard-node/internal/nlog"
@@ -15,6 +16,40 @@ import (
 )
 
 var startTime = time.Now()
+
+// collectInterval is the refresh rate of the background sampler. Every report
+// consumer reads Cached() instead of calling the gopsutil-heavy Collect()
+// itself, so the cost is paid at most once per interval no matter how many
+// nodes/status tickers are active.
+const collectInterval = 5 * time.Second
+
+var (
+	sampleOnce   sync.Once
+	cachedSample atomic.Pointer[Status]
+)
+
+// Cached returns a recently sampled Status. The first call blocks briefly to
+// seed the sample; after that it is a lock-free pointer read. A process-lifetime
+// goroutine refreshes the sample every collectInterval, keeping /proc and
+// disk.Usage work off the service and WebSocket loops.
+func Cached() Status {
+	sampleOnce.Do(func() {
+		s := Collect()
+		cachedSample.Store(&s)
+		go func() {
+			ticker := time.NewTicker(collectInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				s := Collect()
+				cachedSample.Store(&s)
+			}
+		}()
+	})
+	if s := cachedSample.Load(); s != nil {
+		return *s
+	}
+	return Collect()
+}
 
 func init() {
 	// Warm up the CPU sampler. The first cpu.Percent call with interval=0

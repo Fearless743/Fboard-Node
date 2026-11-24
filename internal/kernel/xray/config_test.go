@@ -1171,3 +1171,69 @@ func TestBuildVLESS_WS_TLS_WithCert_EnablesTLS(t *testing.T) {
 		t.Fatalf("certificates: %v", tlsSettings["certificates"])
 	}
 }
+
+func TestResolveTCPFastOpen(t *testing.T) {
+	for _, tt := range []struct {
+		mode string
+		want bool
+	}{
+		{mode: "off", want: false},
+		{mode: "false", want: false},
+		{mode: "disable", want: false},
+		{mode: "on", want: true},
+		{mode: "true", want: true},
+	} {
+		if got := resolveTCPFastOpen(tt.mode); got != tt.want {
+			t.Fatalf("resolveTCPFastOpen(%q) = %v, want %v", tt.mode, got, tt.want)
+		}
+	}
+}
+
+func TestBuildConfig_TCPFastOpenWiring(t *testing.T) {
+	nc := testNodeSpec(&panel.NodeConfig{Protocol: "vless", ServerPort: 443, Network: "tcp"})
+
+	forcedOn := buildConfig(config.KernelConfig{TCPFastOpen: "on"}, nc, testUsers, kernel.TLSCert{})
+	onInbound := forcedOn["inbounds"].([]M)[0]
+	onSockopt, ok := onInbound["streamSettings"].(M)["sockopt"].(M)
+	if !ok || onSockopt["tcpFastOpen"] != true {
+		t.Fatalf("forced-on TCP inbound missing tcpFastOpen: %v", onInbound["streamSettings"])
+	}
+
+	forcedOff := buildConfig(config.KernelConfig{TCPFastOpen: "off"}, nc, testUsers, kernel.TLSCert{})
+	offInbound := forcedOff["inbounds"].([]M)[0]
+	if so, ok := offInbound["streamSettings"].(M)["sockopt"].(M); ok {
+		if _, exists := so["tcpFastOpen"]; exists {
+			t.Fatalf("forced-off TCP inbound still has tcpFastOpen: %v", so)
+		}
+	}
+}
+
+func TestApplyTCPFastOpen(t *testing.T) {
+	// TCP-based inbound: TFO added, existing sockopt preserved.
+	tcpInbound := M{"streamSettings": M{
+		"network": "tcp",
+		"sockopt": M{"acceptProxyProtocol": true},
+	}}
+	applyTCPFastOpen(tcpInbound, true)
+	so := tcpInbound["streamSettings"].(M)["sockopt"].(M)
+	if so["tcpFastOpen"] != true {
+		t.Fatalf("tcpFastOpen = %v, want true", so["tcpFastOpen"])
+	}
+	if so["acceptProxyProtocol"] != true {
+		t.Fatalf("acceptProxyProtocol was dropped: %v", so)
+	}
+
+	// QUIC-based inbound: untouched.
+	quicInbound := M{"streamSettings": M{"network": "hysteria"}}
+	applyTCPFastOpen(quicInbound, true)
+	if _, ok := quicInbound["streamSettings"].(M)["sockopt"]; ok {
+		t.Fatal("hysteria must not get TCP sockopt")
+	}
+
+	// Explicitly disabled: no sockopt created.
+	offInbound := M{"streamSettings": M{"network": "ws"}}
+	applyTCPFastOpen(offInbound, false)
+	if _, ok := offInbound["streamSettings"].(M)["sockopt"]; ok {
+		t.Fatal("disabled TFO must not add sockopt")
+	}
+}

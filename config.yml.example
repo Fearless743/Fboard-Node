@@ -21,6 +21,9 @@ machine:
 #   log_level: "warn"
 #   # Per-connection xray pipe buffer in KiB (default 16). Raise for high-throughput links.
 #   # buffer_size: 16
+#   # TCP Fast Open on TCP inbounds (default auto: only if the kernel supports server-side TFO).
+#   # Saves one RTT on the handshake for clients that support it. Use "off" to disable.
+#   # tcp_fast_open: auto
 # runtime:
 #   # Default GOGC is 50 (more aggressive than Go's 100) for lower RSS under churn.
 #   # gogc: 50

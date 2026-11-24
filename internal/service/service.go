@@ -723,7 +723,7 @@ func (s *Service) drainMachineMailbox(ctx context.Context) {
 }
 
 func (s *Service) wsMetrics() map[string]interface{} {
-	status := monitor.Collect()
+	status := monitor.Cached()
 	m := s.buildMetrics(status)
 	m["kernel_status"] = s.kernel.IsRunning()
 	return m
@@ -1423,9 +1423,6 @@ func (s *Service) pushReportAsync(ctx context.Context) {
 	traffic := s.tracker.FlushTraffic()
 	aliveIPs := s.tracker.FlushAliveIPs()
 	online := s.tracker.CurrentOnline()
-	status := monitor.Collect()
-	metrics := s.buildMetrics(status)
-	metrics["kernel_status"] = s.kernel.IsRunning()
 	reportID := s.currentReportID()
 
 	go func() {
@@ -1438,6 +1435,11 @@ func (s *Service) pushReportAsync(ctx context.Context) {
 				)
 			}
 		}()
+		// Metrics collection (gopsutil, stats snapshots) runs off the service
+		// loop so a slow /proc or disk cannot delay config/user sync events.
+		status := monitor.Cached()
+		metrics := s.buildMetrics(status)
+		metrics["kernel_status"] = s.kernel.IsRunning()
 		reportCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		if err := s.sink.Report(reportCtx, controlplane.ReportPayload{ReportID: reportID, Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
@@ -1467,9 +1469,6 @@ func (s *Service) pushReportSync(ctx context.Context) {
 	traffic := s.tracker.FlushTraffic()
 	aliveIPs := s.tracker.FlushAliveIPs()
 	online := s.tracker.CurrentOnline()
-	status := monitor.Collect()
-	metrics := s.buildMetrics(status)
-	metrics["kernel_status"] = s.kernel.IsRunning()
 
 	reportID := s.currentReportID()
 	syncCtx, cancel := context.WithTimeout(ctx, finalReportTimeout)
@@ -1486,6 +1485,9 @@ func (s *Service) pushReportSync(ctx context.Context) {
 				done <- fmt.Errorf("final report panicked: %v", r)
 			}
 		}()
+		status := monitor.Cached()
+		metrics := s.buildMetrics(status)
+		metrics["kernel_status"] = s.kernel.IsRunning()
 		done <- s.sink.Report(syncCtx, controlplane.ReportPayload{ReportID: reportID, Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics})
 	}()
 

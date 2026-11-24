@@ -34,6 +34,72 @@ var privateIPCidrs = []string{
 	"::1/128",
 }
 
+var (
+	tfoOnce      sync.Once
+	tfoAvailable bool
+)
+
+// tcpFastOpenServerEnabled reports whether the kernel allows TCP Fast Open on
+// listening sockets. Linux exposes this as a bitmask in tcp_fastopen: bit 1
+// (0x2) enables server-side TFO. Reading it lets us enable TFO by default on
+// capable hosts without ever issuing a setsockopt that could fail and take the
+// inbound down on kernels that do not support it.
+func tcpFastOpenServerEnabled() bool {
+	tfoOnce.Do(func() {
+		data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_fastopen")
+		if err != nil {
+			return
+		}
+		v, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			return
+		}
+		tfoAvailable = v&0x2 != 0
+	})
+	return tfoAvailable
+}
+
+// resolveTCPFastOpen maps the config value to a boolean. Unknown/empty values
+// fall back to auto-detection, so an operator can always force it off with
+// "off" if a particular network path misbehaves.
+func resolveTCPFastOpen(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "off", "false", "disable", "disabled":
+		return false
+	case "on", "true", "enable", "enabled":
+		return true
+	default:
+		return tcpFastOpenServerEnabled()
+	}
+}
+
+// applyTCPFastOpen adds tcpFastOpen to TCP-based inbounds only. QUIC-based
+// protocols (hysteria, tuic, masque, …) are skipped because they have no TCP
+// handshake to save. Existing sockopt fields are preserved.
+func applyTCPFastOpen(inbound M, enabled bool) {
+	if inbound == nil || !enabled {
+		return
+	}
+	ss, ok := inbound["streamSettings"].(M)
+	if !ok {
+		return
+	}
+	network, _ := ss["network"].(string)
+	switch strings.ToLower(network) {
+	case "tcp", "ws", "grpc", "h2", "http", "httpupgrade", "xhttp", "":
+	default:
+		return
+	}
+	sockopt, _ := ss["sockopt"].(M)
+	if sockopt == nil {
+		sockopt = M{}
+		ss["sockopt"] = sockopt
+	}
+	if _, exists := sockopt["tcpFastOpen"]; !exists {
+		sockopt["tcpFastOpen"] = true
+	}
+}
+
 func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
 	var outbounds []M
 	tags := make(map[string]bool)
@@ -116,6 +182,7 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 
 	inbound := buildInbound(nc, users, tc)
 	if inbound != nil {
+		applyTCPFastOpen(inbound, resolveTCPFastOpen(kcfg.TCPFastOpen))
 		cfg["inbounds"] = []M{inbound}
 	} else {
 		nlog.Core().Warn("xray: unsupported protocol, no inbound configured",

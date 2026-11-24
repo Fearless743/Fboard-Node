@@ -135,6 +135,13 @@ type KernelConfig struct {
 	// 0 = use the built-in default (16).
 	BufferSize int `yaml:"buffer_size"`
 
+	// TCPFastOpen controls TCP Fast Open on TCP-based inbounds. It can save
+	// one RTT on the handshake for clients that support it.
+	//   "" / "auto" - enable only when the kernel has server-side TFO on
+	//   "on"        - always set tcpFastOpen (requires kernel support)
+	//   "off"       - never set it (safe fallback for incompatible kernels)
+	TCPFastOpen string `yaml:"tcp_fast_open"`
+
 	// CustomOutbound adds outbound entries to the generated xray config.
 	// Each item is a raw xray-native outbound object.
 	CustomOutbound []map[string]any `yaml:"custom_outbound"`
@@ -550,6 +557,9 @@ func (c *Config) inheritFrom(parent *Config) {
 	}
 	if c.Kernel.BufferSize == 0 {
 		c.Kernel.BufferSize = parent.Kernel.BufferSize
+	}
+	if c.Kernel.TCPFastOpen == "" {
+		c.Kernel.TCPFastOpen = parent.Kernel.TCPFastOpen
 	}
 	// Cert (NOT cert_dir — derived from config_dir later)
 	if c.Cert.CertMode == "" {
