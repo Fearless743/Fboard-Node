@@ -1009,6 +1009,13 @@ func buildRealitySettings(nc *model.NodeSpec) M {
 		}
 	}
 
+	// ECH server-side for REALITY: same tls_settings.ech config used by TLS.
+	// When enabled, the REALITY listener decrypts ECH ClientHellos and uses
+	// the inner hello for auth/routing.
+	if echKeys := extractECHServerKeys(nc.TLSSettings); echKeys != "" {
+		reality["echServerKeys"] = echKeys
+	}
+
 	return reality
 }
 

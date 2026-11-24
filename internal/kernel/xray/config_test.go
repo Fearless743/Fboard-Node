@@ -944,6 +944,50 @@ func TestBuildRealitySettings_NormalizesPrivateKey(t *testing.T) {
 	}
 }
 
+func TestBuildRealitySettings_ECH(t *testing.T) {
+	rawBytes := []byte{0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF}
+	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "ECH KEYS", Bytes: rawBytes}))
+	expected := base64.StdEncoding.EncodeToString(rawBytes)
+
+	tests := []struct {
+		name    string
+		ech     interface{}
+		wantECH string
+	}{
+		{
+			name:    "enabled with key",
+			ech:     map[string]interface{}{"enabled": true, "key": pemStr},
+			wantECH: expected,
+		},
+		{
+			name:    "disabled",
+			ech:     map[string]interface{}{"enabled": false, "key": pemStr},
+			wantECH: "",
+		},
+		{
+			name:    "absent",
+			ech:     nil,
+			wantECH: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tls := map[string]interface{}{
+				"private_key": base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+				"server_name": "www.example.com",
+			}
+			if tt.ech != nil {
+				tls["ech"] = tt.ech
+			}
+			settings := buildRealitySettings(&model.NodeSpec{TLSSettings: tls})
+			got, _ := settings["echServerKeys"].(string)
+			if got != tt.wantECH {
+				t.Fatalf("echServerKeys = %q, want %q", got, tt.wantECH)
+			}
+		})
+	}
+}
+
 func TestBuildHysteria_RealmSettings(t *testing.T) {
 	users := []model.UserSpec{{ID: 1, UUID: "user-uuid-1"}}
 	tc := kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")}
