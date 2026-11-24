@@ -1,0 +1,13 @@
+syntax = "proto3";
+package xray.common.protocol;
+option go_package = "github.com/fearless743/fboard-node/internal/xraycore/common/protocol";
+option java_package = "com.xray.common.protocol";
+option java_outer_classname = "XrayCommonProtocol";
+option java_multiple_files = true;
+import "common/serial/typed_message.proto";
+
+message User {
+  uint32 level = 1;
+  string email = 2;
+  xray.common.serial.TypedMessage account = 3;
+}

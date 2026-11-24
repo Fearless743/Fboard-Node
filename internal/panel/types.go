@@ -160,6 +160,12 @@ type NodeConfig struct {
 	MasqueAllowInsecure      bool     `json:"masque_allow_insecure,omitempty"`
 	MasqueEndpointPrivateKey string   `json:"masque_endpoint_private_key,omitempty"`
 
+	// Snell (sing-snell v5 server / v4-v6 client)
+	SnellVersion int    `json:"snell_version,omitempty"`
+	SnellPSK     string `json:"snell_psk,omitempty"`
+	SnellObfs    string `json:"snell_obfs,omitempty"`
+	SnellV6Mode  string `json:"snell_v6_mode,omitempty"`
+
 	// Multiplex
 	Multiplex *MultiplexConfig `json:"multiplex,omitempty"`
 

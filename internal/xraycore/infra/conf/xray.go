@@ -42,6 +42,7 @@ var (
 		"sudoku":        func() interface{} { return new(SudokuServerConfig) },
 		"trusttunnel":   func() interface{} { return new(TrustTunnelServerConfig) },
 		"masque":        func() interface{} { return new(MASQUEServerConfig) },
+		"snell":         func() interface{} { return new(SnellServerConfig) },
 		"tun":           func() interface{} { return new(TunConfig) },
 	}, "protocol", "settings")
 
@@ -60,6 +61,7 @@ var (
 		"hysteria":    func() interface{} { return new(HysteriaClientConfig) },
 		"dns":         func() interface{} { return new(DNSOutboundConfig) },
 		"wireguard":   func() interface{} { return &WireGuardConfig{IsClient: true} },
+		"snell":       func() interface{} { return new(SnellClientConfig) },
 	}, "protocol", "settings")
 )
 
@@ -356,13 +358,13 @@ type Config struct {
 	// left for returning error
 	Transport map[string]json.RawMessage `json:"transport"`
 
-	LogConfig        *LogConfig              `json:"log"`
-	RouterConfig     *RouterConfig           `json:"routing"`
-	DNSConfig        *DNSConfig              `json:"dns"`
-	InboundConfigs   []InboundDetourConfig   `json:"inbounds"`
-	OutboundConfigs  []OutboundDetourConfig  `json:"outbounds"`
-	Policy           *PolicyConfig           `json:"policy"`
-	Stats            *StatsConfig            `json:"stats"`
+	LogConfig       *LogConfig             `json:"log"`
+	RouterConfig    *RouterConfig          `json:"routing"`
+	DNSConfig       *DNSConfig             `json:"dns"`
+	InboundConfigs  []InboundDetourConfig  `json:"inbounds"`
+	OutboundConfigs []OutboundDetourConfig `json:"outbounds"`
+	Policy          *PolicyConfig          `json:"policy"`
+	Stats           *StatsConfig           `json:"stats"`
 }
 
 func (c *Config) findInboundTag(tag string) int {
@@ -409,10 +411,6 @@ func (c *Config) Override(o *Config, fn string) {
 	if o.Stats != nil {
 		c.Stats = o.Stats
 	}
-
-
-
-
 
 	// update the Inbound in slice if the only one in override config has same tag
 	if len(o.InboundConfigs) > 0 {
@@ -507,11 +505,6 @@ func (c *Config) Build() (*core.Config, error) {
 		}
 		config.App = append(config.App, serial.ToTypedMessage(pc))
 	}
-
-
-
-
-
 
 	var inbounds []InboundDetourConfig
 

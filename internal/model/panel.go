@@ -143,6 +143,10 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 		MasqueServerName:               nc.MasqueServerName,
 		MasqueAllowInsecure:            nc.MasqueAllowInsecure,
 		MasqueEndpointPrivateKey:       nc.MasqueEndpointPrivateKey,
+		SnellVersion:                   nc.SnellVersion,
+		SnellPSK:                       nc.SnellPSK,
+		SnellObfs:                      nc.SnellObfs,
+		SnellV6Mode:                    nc.SnellV6Mode,
 		Multiplex:                      multiplex,
 		AcceptProxyProtocol:            nc.AcceptProxyProtocol,
 	}
@@ -328,6 +332,10 @@ func (n *NodeSpec) ToPanel() *panel.NodeConfig {
 		MasqueServerName:               n.MasqueServerName,
 		MasqueAllowInsecure:            n.MasqueAllowInsecure,
 		MasqueEndpointPrivateKey:       n.MasqueEndpointPrivateKey,
+		SnellVersion:                   n.SnellVersion,
+		SnellPSK:                       n.SnellPSK,
+		SnellObfs:                      n.SnellObfs,
+		SnellV6Mode:                    n.SnellV6Mode,
 		Multiplex:                      multiplex,
 		AcceptProxyProtocol:            n.AcceptProxyProtocol,
 	}

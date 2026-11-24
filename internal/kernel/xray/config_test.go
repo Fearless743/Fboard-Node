@@ -203,6 +203,16 @@ func TestBuildConfig_AllProtocols_ValidJSON(t *testing.T) {
 				MasqueEndpointPrivateKey: "test-endpoint-key-pem",
 			},
 		},
+		{
+			name: "snell",
+			nc: panel.NodeConfig{
+				Protocol:     "snell",
+				ServerPort:   930,
+				SnellVersion: 5,
+				SnellPSK:     "snell-server-psk",
+				SnellObfs:    "http",
+			},
+		},
 	}
 
 	for _, tc := range protocols {
@@ -232,6 +242,47 @@ func TestBuildConfig_AllProtocols_ValidJSON(t *testing.T) {
 
 			t.Logf("config size: %d bytes", len(data))
 		})
+	}
+}
+
+func TestBuildSnellInbound(t *testing.T) {
+	nc := panel.NodeConfig{
+		Protocol:     "snell",
+		ServerPort:   930,
+		SnellVersion: 6,
+		SnellPSK:     "snell-server-psk",
+		SnellV6Mode:  "unshaped",
+	}
+	cfg := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	inbounds, ok := cfg["inbounds"].([]M)
+	if !ok || len(inbounds) != 1 {
+		t.Fatalf("expected one inbound, got %#v", cfg["inbounds"])
+	}
+	inbound := inbounds[0]
+	if inbound["protocol"] != "snell" {
+		t.Fatalf("unexpected protocol: %v", inbound["protocol"])
+	}
+	settings, ok := inbound["settings"].(M)
+	if !ok {
+		t.Fatalf("missing settings: %#v", inbound["settings"])
+	}
+	if settings["version"] != int32(6) && settings["version"] != 6 {
+		t.Fatalf("unexpected version: %v", settings["version"])
+	}
+	if settings["psk"] != "snell-server-psk" {
+		t.Fatalf("unexpected psk: %v", settings["psk"])
+	}
+	if settings["v6_mode"] != "unshaped" {
+		t.Fatalf("unexpected v6 mode: %v", settings["v6_mode"])
+	}
+	clients, ok := settings["clients"].([]M)
+	if !ok || len(clients) != len(testUsers) {
+		t.Fatalf("unexpected clients: %#v", settings["clients"])
+	}
+	for _, client := range clients {
+		if client["user_key"] == "" || client["email"] == "" {
+			t.Fatalf("incomplete snell client: %#v", client)
+		}
 	}
 }
 

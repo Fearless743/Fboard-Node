@@ -154,6 +154,8 @@ func normalizeProto(p string) string {
 		return "mieru"
 	case "sudoku":
 		return "sudoku"
+	case "snell":
+		return "snell"
 	case "http":
 		return "http"
 	case "socks":

@@ -29,6 +29,7 @@ import (
 	sqAccount "github.com/fearless743/fboard-node/internal/xraycore/proxy/shadowquic/account"
 	"github.com/fearless743/fboard-node/internal/xraycore/proxy/shadowsocks"
 	ss2022 "github.com/fearless743/fboard-node/internal/xraycore/proxy/shadowsocks_2022"
+	snellproxy "github.com/fearless743/fboard-node/internal/xraycore/proxy/snell"
 	sudokuproxy "github.com/fearless743/fboard-node/internal/xraycore/proxy/sudoku"
 	"github.com/fearless743/fboard-node/internal/xraycore/proxy/trojan"
 	ttAccount "github.com/fearless743/fboard-node/internal/xraycore/proxy/trusttunnel/account"
@@ -114,7 +115,7 @@ func (x *Xray) Protocols() []string {
 	return []string{
 		"vmess", "vless", "trojan", "shadowsocks",
 		"hysteria", "socks", "http",
-		"tuic", "anytls", "naive", "mieru", "shadowquic", "sudoku", "trusttunnel", "masque",
+		"tuic", "anytls", "naive", "mieru", "shadowquic", "sudoku", "trusttunnel", "masque", "snell",
 	}
 }
 
@@ -699,6 +700,10 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
 	case "masque":
 		// Same UUID convention; the transport hub authenticates by password.
 		mu.Account = &masqueAccount.MemoryAccount{Username: u.UUID, Password: u.UUID}
+
+	case "snell":
+		// Panel user UUID carries the derived Snell client id (user key).
+		mu.Account = &snellproxy.MemoryAccount{UserKey: u.UUID}
 
 	default:
 		return nil, fmt.Errorf("protocol %q does not support MemoryUser", proto)

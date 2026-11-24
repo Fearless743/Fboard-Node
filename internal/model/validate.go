@@ -34,6 +34,10 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 		return err
 	}
 
+	if err := validateSnell(n); err != nil {
+		return err
+	}
+
 	if len(n.CustomOutbounds) > MaxCustomOutbounds {
 		return fmt.Errorf("custom_outbounds exceeds max %d (got %d)", MaxCustomOutbounds, len(n.CustomOutbounds))
 	}
@@ -75,6 +79,19 @@ func validateMasque(n *NodeSpec) error {
 	}
 	return nil
 }
+func validateSnell(n *NodeSpec) error {
+	if !strings.EqualFold(n.Protocol, "snell") {
+		return nil
+	}
+	if strings.TrimSpace(n.SnellPSK) == "" {
+		return fmt.Errorf("snell requires psk (snell_psk)")
+	}
+	if version := n.SnellVersion; version != 0 && version != 5 && version != 6 {
+		return fmt.Errorf("snell inbound only supports version 5 or 6, got %d", version)
+	}
+	return nil
+}
+
 func validateHysteriaListenPorts(n *NodeSpec) error {
 	raw := strings.TrimSpace(n.ListenPorts)
 	if raw == "" {

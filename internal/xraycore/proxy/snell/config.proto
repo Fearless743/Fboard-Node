@@ -1,0 +1,31 @@
+syntax = "proto3";
+package xray.proxy.snell;
+option go_package = "github.com/fearless743/fboard-node/internal/xraycore/proxy/snell";
+option java_package = "com.xray.proxy.snell";
+option java_outer_classname = "XrayProxySnell";
+option java_multiple_files = true;
+import "common/protocol/user.proto";
+
+message Account {
+  string user_key = 1;
+}
+
+message ServerConfig {
+  repeated xray.common.protocol.User users = 1;
+  int32 version = 2;
+  string psk = 3;
+  string obfs_mode = 4;
+  string v6_mode = 5;
+}
+
+message ClientConfig {
+  string server = 1;
+  int32 port = 2;
+  int32 version = 3;
+  string psk = 4;
+  string user_key = 5;
+  string obfs_mode = 6;
+  string obfs_host = 7;
+  string v6_mode = 8;
+  bool reuse = 9;
+}

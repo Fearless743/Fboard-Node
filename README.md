@@ -17,7 +17,7 @@ Node backend for [Fboard](https://github.com/Fearless743/Fboard). Based on [Xboa
 
 ## 功能
 
-- 协议: VMess、VLESS、Trojan、Shadowsocks、Hysteria2、TUIC、AnyTLS、Naive、Mieru、SOCKS、HTTP
+- 协议: VMess、VLESS、Trojan、Shadowsocks、Hysteria2、TUIC、AnyTLS、Naive、Mieru、SOCKS、HTTP、Snell（v5 服务端 / v4-v6 客户端）
 - 内核: xray-core（单内核，已移除 sing-box / mihomo）
 - 同步: REST 轮询为基线（节点/配置/用户/上报），WebSocket 负责增量、实时设备状态和远程操作
 - 用户控制: 限速、设备限制、在线 IP 追踪、热更新

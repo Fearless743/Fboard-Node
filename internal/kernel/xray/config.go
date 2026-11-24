@@ -479,6 +479,8 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 		return buildTrustTunnel(base, nc, users, tc)
 	case "masque":
 		return buildMasque(base, nc, users, tc)
+	case "snell":
+		return buildSnell(base, nc, users)
 	default:
 		return nil
 	}
@@ -1392,6 +1394,31 @@ func buildAnyTLS(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.T
 		nc.TLS = 1
 		applyStreamSettings(base, nc, tc)
 	}
+	return base
+}
+
+func buildSnell(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+	clients := make([]M, 0, len(users))
+	for _, u := range users {
+		clients = append(clients, M{
+			"user_key": u.UUID,
+			"email":    userEmail(u.ID),
+		})
+	}
+	version := nc.SnellVersion
+	if version == 0 {
+		version = 5
+	}
+	settings := M{
+		"clients":   clients,
+		"version":   version,
+		"psk":       nc.SnellPSK,
+		"obfs_mode": nc.SnellObfs,
+		"v6_mode":   nc.SnellV6Mode,
+	}
+	base["settings"] = settings
+	// Snell is a plaintext TCP protocol; it does not use stream TLS.
+	base["streamSettings"] = M{"sockopt": M{"reusePort": true}}
 	return base
 }
 

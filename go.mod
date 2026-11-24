@@ -42,7 +42,7 @@ require (
 	github.com/pion/stun/v3 v3.1.2
 	github.com/pires/go-proxyproto v0.11.0
 	github.com/refraction-networking/utls v1.8.3-0.20260301010127-aa6edf4b11af
-	github.com/sagernet/sing v0.8.2
+	github.com/sagernet/sing v0.9.7-0.20261124080605-951be67f90df
 	github.com/sagernet/sing-shadowsocks v0.2.8
 	github.com/shirou/gopsutil/v4 v4.26.2
 	github.com/vishvananda/netlink v1.3.1
@@ -63,7 +63,10 @@ require (
 	lukechampine.com/blake3 v1.4.1
 )
 
-require golang.org/x/net v0.58.0
+require (
+	github.com/sagernet/sing-snell v0.0.0-20261124143757-d735f971a06c
+	golang.org/x/net v0.58.0
+)
 
 require (
 	cloud.google.com/go/auth v0.18.2 // indirect

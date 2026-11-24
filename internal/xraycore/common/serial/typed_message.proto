@@ -1,0 +1,11 @@
+syntax = "proto3";
+package xray.common.serial;
+option go_package = "github.com/fearless743/fboard-node/internal/xraycore/common/serial";
+option java_package = "com.xray.common.serial";
+option java_outer_classname = "XrayCommonSerial";
+option java_multiple_files = true;
+
+message TypedMessage {
+  string type = 1;
+  bytes value = 2;
+}

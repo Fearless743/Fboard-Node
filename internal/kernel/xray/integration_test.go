@@ -211,6 +211,32 @@ func TestXrayIntegration_Shadowsocks_2022(t *testing.T) {
 	testXrayProtocol(t, nc, port)
 }
 
+func TestXrayIntegration_Snell_V5(t *testing.T) {
+	port := freePort(t)
+	nc := &model.NodeSpec{
+		Protocol:     "snell",
+		ListenIP:     "127.0.0.1",
+		ServerPort:   port,
+		SnellVersion: 5,
+		SnellPSK:     "snell-server-psk-0123456789",
+		SnellObfs:    "http",
+	}
+	testXrayProtocol(t, nc, port)
+}
+
+func TestXrayIntegration_Snell_V6(t *testing.T) {
+	port := freePort(t)
+	nc := &model.NodeSpec{
+		Protocol:     "snell",
+		ListenIP:     "127.0.0.1",
+		ServerPort:   port,
+		SnellVersion: 6,
+		SnellPSK:     "snell-server-psk-0123456789",
+		SnellV6Mode:  "default",
+	}
+	testXrayProtocol(t, nc, port)
+}
+
 func TestXrayIntegration_Socks(t *testing.T) {
 	port := freePort(t)
 	nc := &model.NodeSpec{

@@ -81,6 +81,12 @@ type NodeSpec struct {
 	// (usque architecture: pinned by clients, self-signed server cert).
 	MasqueEndpointPrivateKey string
 
+	// Snell
+	SnellVersion int
+	SnellPSK     string
+	SnellObfs    string
+	SnellV6Mode  string
+
 	Multiplex           *MultiplexConfig
 	AcceptProxyProtocol bool
 }
